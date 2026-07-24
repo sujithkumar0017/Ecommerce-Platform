@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import ProductCard from '../components/ProductCard.jsx';
 import { SkeletonGrid } from '../components/Skeleton.jsx';
+import Icon from '../components/Icon.jsx';
 
 export default function Products() {
   const [params, setParams] = useSearchParams();
@@ -113,7 +114,7 @@ export default function Products() {
 
         {loading ? <SkeletonGrid count={9} />
           : products.length === 0
-            ? <div className="card empty"><div className="ic">🔍</div><h3>No products match your filters</h3><p className="muted">Try adjusting or clearing your filters.</p></div>
+            ? <div className="card empty"><div className="ic"><Icon name="search" size={40} /></div><h3>No products match your filters</h3><p className="muted">Try adjusting or clearing your filters.</p></div>
             : <div className="grid products-grid stagger" key={products.map((p) => p.id).join(',')}>{products.map((p) => <ProductCard key={p.id} p={p} />)}</div>}
       </section>
     </div>

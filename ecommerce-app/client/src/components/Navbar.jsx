@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useCart } from '../context/CartContext.jsx';
+import Icon from './Icon.jsx';
 
 export default function Navbar() {
   const { user, logout } = useAuth();
@@ -25,13 +26,14 @@ export default function Navbar() {
         <div className="nav-links">
           <Link to="/products">Shop</Link>
           <Link to="/cart" className="nav-cart" aria-label={`Cart, ${count} items`}>
+            <Icon name="cart" size={18} />
             <span className="hide-sm">Cart</span>
             {count > 0 && <span className="nav-count">{count}</span>}
           </Link>
           {user ? (
             <>
               <Link to="/orders">Orders</Link>
-              <Link to="/account">{user.name.split(' ')[0]}</Link>
+              <Link to="/account"><Icon name="user" size={18} />{user.name.split(' ')[0]}</Link>
               <button className="btn btn-sm btn-ghost" onClick={() => { logout(); nav('/'); }}>Logout</button>
             </>
           ) : (

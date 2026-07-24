@@ -50,7 +50,7 @@ export default function ProductDetail() {
 
   return (
     <div className="container">
-      <div className="layout-2" style={{ gridTemplateColumns: '420px 1fr' }}>
+      <div className="layout-2 pdp-grid">
         <div>
           <img src={img} alt={product.name} style={{ width: '100%', borderRadius: 12, background: 'var(--surface-2)' }} />
           <div className="row wrap" style={{ marginTop: 10 }}>
