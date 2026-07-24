@@ -52,7 +52,7 @@ services:
           name: shopkart-db
           property: connectionString
       - key: CLIENT_URL
-        value: https://shopkart-ecommerce.netlify.app
+        value: https://app-shopcart.netlify.app
 
   # ──────────────────────────────  ADMIN API  ──────────────────────────────
   - type: web
@@ -79,7 +79,7 @@ services:
       - key: CLIENT_URL
         value: https://shopkart-admin.netlify.app
       - key: ECOMMERCE_APP_URL
-        value: https://shopkart-ecommerce.netlify.app
+        value: https://app-shopcart.netlify.app
 
   # Frontends are NOT here — they deploy to Netlify (see the netlify.toml files
   # in ecommerce-app/client and admin-app/client, and DEPLOY.md).
