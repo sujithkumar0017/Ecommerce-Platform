@@ -1,148 +1,114 @@
-# 🚀 Deploying ShopKart (free tier, Render)
+# 🚀 Deploying ShopKart (free) — Netlify frontends + Render backends
 
-This monorepo deploys as **5 services** from a single [`render.yaml`](render.yaml)
-blueprint — two APIs, two React SPAs, and one shared PostgreSQL database:
+Netlify can't run Express servers or PostgreSQL, so this project splits across
+two free platforms:
 
-| Service | Type | Source folder |
+| Piece | Platform | Source folder |
 |---|---|---|
-| `shopkart-db` | PostgreSQL (free) | — |
-| `shopkart-ecommerce-api` | Node Web Service | `ecommerce-app` |
-| `shopkart-admin-api` | Node Web Service | `admin-app` |
-| `shopkart-ecommerce-web` | Static Site (SPA) | `ecommerce-app/client` |
-| `shopkart-admin-web` | Static Site (SPA) | `admin-app/client` |
+| Storefront SPA | **Netlify** | `ecommerce-app/client` |
+| Admin SPA | **Netlify** | `admin-app/client` |
+| Ecommerce API | **Render** (Web Service) | `ecommerce-app` |
+| Admin API | **Render** (Web Service) | `admin-app` |
+| PostgreSQL (shared) | **Render** | — |
 
-Both APIs connect to the **same** `shopkart-db`, exactly like local dev.
+Both APIs talk to the **same** Render Postgres. The frontends call the APIs over
+HTTPS (baked in via `VITE_API_URL`); the APIs allow those origins via CORS
+(`CLIENT_URL`).
 
-> **Free-tier expectations (fine for internal testing):**
-> - APIs **sleep after ~15 min idle**; the next request wakes them (~30–50s cold start).
-> - Render's **free Postgres is deleted after 30 days**. For a permanent free DB, see
->   [Option B: Neon](#option-b-permanent-free-database-neon) below.
-
----
-
-## ✅ What's already done for you
-- Production **DB SSL** wired into both backends (`DB_SSL=true`).
-- **CORS** locked to the deployed frontends in production.
-- `render.yaml` blueprint with all env vars, health checks and SPA routing.
-- Root `.gitignore` (your `.env` secrets are **never** committed).
-- Everything committed on branch `main`.
-
-You only need to: **push to GitHub → create the Blueprint → seed the DB once.**
+> **Free-tier expectations (fine for a sub-month internal test):**
+> - Render APIs **sleep after ~15 min idle**; the next request wakes them (~30–50s).
+> - Render's free Postgres is **deleted after 30 days**.
 
 ---
 
-## 1. Push the monorepo to GitHub
+## ✅ Already done for you
+- `render.yaml` — provisions the DB + both APIs (with SSL, health checks, CORS).
+- `netlify.toml` in each client folder — build command, `dist` publish, SPA
+  redirects, and the `VITE_API_URL` pointing at the Render APIs.
+- Production DB SSL + CORS hardening in the server code.
+- Everything committed and pushed to `github.com/sujithkumar0017/Ecommerce-Platform` (`main`).
 
-Create a **new empty repo** on GitHub (e.g. `shopkart`) — no README/gitignore.
-Then, from `d:\E-Commerce`:
-
-```powershell
-git remote add origin https://github.com/<your-username>/shopkart.git
-git push -u origin main
-```
-
-> Your existing `Ecommerce-Platform` repo is unaffected. If you'd rather reuse it,
-> point `origin` at that URL instead and `git push -u origin main --force`
-> (this replaces its contents with the monorepo layout).
+You do: **(1) deploy backends on Render → (2) deploy the two frontends on Netlify
+→ (3) reconcile the URLs.**
 
 ---
 
-## 2. Create the Render Blueprint
+## Part 1 — Backends + database on Render
 
-1. Sign in at **https://dashboard.render.com** (free account, "Sign in with GitHub").
-2. **New ➜ Blueprint**.
-3. Connect/select your `shopkart` repo. Render auto-detects `render.yaml`.
-4. Review the 5 resources it will create, then **Apply**.
-
-Render now builds and deploys everything. The database comes up first, then the
-APIs (their build runs `npm run db:migrate`, creating all tables), then the SPAs.
-
----
-
-## 3. Verify the URLs (important — 2-minute check)
-
-`render.yaml` pre-fills the four public URLs assuming these names are free:
-
-| Env var | Set on | Expected value |
-|---|---|---|
-| `VITE_API_URL` | ecommerce-web | `https://shopkart-ecommerce-api.onrender.com/api` |
-| `VITE_API_URL` | admin-web | `https://shopkart-admin-api.onrender.com/api` |
-| `CLIENT_URL` | ecommerce-api | `https://shopkart-ecommerce-web.onrender.com` |
-| `CLIENT_URL` | admin-api | `https://shopkart-admin-web.onrender.com` |
-| `ECOMMERCE_APP_URL` | admin-api | `https://shopkart-ecommerce-web.onrender.com` |
-
-**If Render appended a random suffix** to any service name (because the name was
-taken globally), open that service → **Settings**, copy its real URL, and fix the
-env vars above to match. Then:
-- Changed a `CLIENT_URL` / `ECOMMERCE_APP_URL`? The API restarts automatically.
-- Changed a `VITE_API_URL`? The SPA must be **rebuilt** — click **Manual Deploy ➜
-  Deploy latest commit** on that Static Site (Vite bakes the URL in at build time).
-
-Check each API is alive: open `https://<api-url>/api/health` → should return
-`{"ok":true,"db":"connected"}`.
-
----
-
-## 4. Seed the database once
-
-Tables are created automatically by the migrate step. To load the sample catalog,
-coupons and the **admin login**, run the seed once:
-
-1. Open **shopkart-ecommerce-api** → **Shell** tab.
-2. Run:
+1. Sign in at **https://dashboard.render.com** ("Sign in with GitHub").
+2. **New ➜ Blueprint** ➜ select **`Ecommerce-Platform`** ➜ **Apply**.
+   Render creates `shopkart-db`, `shopkart-ecommerce-api`, `shopkart-admin-api`.
+   The APIs' build step runs `npm run db:migrate`, creating all tables.
+3. When the APIs are live, note their URLs (Dashboard → each service), e.g.:
+   - `https://shopkart-ecommerce-api.onrender.com`
+   - `https://shopkart-admin-api.onrender.com`
+4. Health-check each: open `https://<api-url>/api/health` → `{"ok":true,"db":"connected"}`.
+5. **Seed the database once** — `shopkart-ecommerce-api` → **Shell** tab:
    ```bash
    npm run db:seed
    ```
-
-This creates the admin account (see `ecommerce-app/server/db/seed.js`) and demo
-products. It's safe to re-run; it refreshes the catalog but keeps customer
-accounts and orders.
-
-> Prefer a clean slate later? `npm run db:reset` (⚠️ drops & recreates all tables).
+   This creates the admin login (see `ecommerce-app/server/db/seed.js`) and demo catalog.
 
 ---
 
-## 5. Use your deployed apps
+## Part 2 — Frontends on Netlify (two sites, same repo)
 
-- **Storefront:** `https://shopkart-ecommerce-web.onrender.com`
-- **Admin dashboard:** `https://shopkart-admin-web.onrender.com`
+Do this **twice** — once per frontend.
 
-Sign up as a customer on the storefront; log into the admin app with the seeded
-admin credentials.
+### Storefront site
+1. Sign in at **https://app.netlify.com** ("Sign in with GitHub").
+2. **Add new site ➜ Import an existing project ➜ GitHub ➜ `Ecommerce-Platform`**.
+3. Configure:
+   - **Base directory:** `ecommerce-app/client`
+   - Build command / publish dir are read from its `netlify.toml`
+     (`npm run build` → `dist`). Leave them as detected.
+4. **Deploy**. Note the URL, e.g. `https://<something>.netlify.app`.
+5. (Optional) **Site settings ➜ Change site name** → `shopkart-ecommerce`
+   so the URL becomes `https://shopkart-ecommerce.netlify.app`.
+
+### Admin site
+Repeat with **Base directory:** `admin-app/client`, and name it `shopkart-admin`.
+
+> `VITE_API_URL` is already set in each `netlify.toml`. If your Render API URLs
+> differ from the predicted ones, override it in **Netlify → Site settings →
+> Environment variables**, then **Trigger deploy ➜ Clear cache and deploy**
+> (Vite bakes the value in at build time).
 
 ---
 
-## Option B: Permanent free database (Neon)
+## Part 3 — Reconcile the URLs (2-minute check)
 
-Render's free Postgres expires after 30 days. For a database that stays free
-indefinitely:
+The two platforms cross-reference each other, so make the four values line up:
 
-1. Create a free project at **https://neon.tech** and copy its
-   **connection string** (`postgresql://…?sslmode=require`).
-2. In `render.yaml`, **delete the `databases:` block**, and on **both** API
-   services replace the `DATABASE_URL` entry:
-   ```yaml
-   - key: DATABASE_URL
-     sync: false        # set the value in the dashboard, don't store in git
-   ```
-   Commit & push, then paste the Neon connection string into each API's
-   **Environment** tab. `DB_SSL=true` is already set, so TLS just works.
-3. Re-run the seed (step 4) against the new database.
+| Value | Where to set | Should equal |
+|---|---|---|
+| `VITE_API_URL` (storefront) | Netlify storefront site (or its `netlify.toml`) | `https://<ecommerce-api>.onrender.com/api` |
+| `VITE_API_URL` (admin) | Netlify admin site (or its `netlify.toml`) | `https://<admin-api>.onrender.com/api` |
+| `CLIENT_URL` (ecommerce-api) | Render ecommerce-api → Environment | `https://<storefront>.netlify.app` |
+| `CLIENT_URL` (admin-api) | Render admin-api → Environment | `https://<admin>.netlify.app` |
+
+- Changed a Render `CLIENT_URL`? The API restarts automatically.
+- Changed a Netlify `VITE_API_URL`? **Clear cache and deploy** the site to rebuild.
+- `CLIENT_URL` must match the Netlify URL **exactly**, with no trailing slash.
+
+Then open your sites:
+- **Storefront:** `https://shopkart-ecommerce.netlify.app`
+- **Admin:** `https://shopkart-admin.netlify.app`
 
 ---
 
 ## Redeploys
-
-Every `git push` to `main` triggers Render to rebuild and redeploy the affected
-services automatically. No further steps needed.
+Every `git push` to `main` auto-redeploys the affected Render services **and**
+Netlify sites. No manual steps (unless you change a `VITE_API_URL`, which needs a
+Netlify rebuild).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| SPA calls fail with CORS error | `CLIENT_URL` on the API must exactly equal the SPA's URL (no trailing slash). |
-| SPA can't reach API / 404s | `VITE_API_URL` wrong → fix it and **Manual Deploy** the Static Site to rebuild. |
-| API logs `no pg_hba.conf entry` / SSL error | Ensure `DB_SSL=true` is set on the API (it is, by default). |
-| `/api/health` shows `db: error` | DB still starting, or `DATABASE_URL` not linked — check the API's Environment tab. |
-| Refreshing a deep link 404s | SPA rewrite rule (already in `render.yaml`) — confirm the Static Site has the `/* → /index.html` rewrite. |
-| First request very slow | Free service woke from sleep — expected. |
+| Browser console shows a CORS error | `CLIENT_URL` on the API must exactly equal the Netlify site URL (no trailing slash). |
+| Frontend loads but API calls 404 / fail | `VITE_API_URL` wrong → fix it and **Clear cache and deploy** on Netlify. |
+| Refreshing a deep link 404s on Netlify | SPA redirect (already in `netlify.toml`) — confirm Base directory is set to the client folder so Netlify reads it. |
+| API `/api/health` shows `db: error` | DB still starting, or `DATABASE_URL` not linked — check the API's Environment tab on Render. |
+| First request very slow | Render free service woke from sleep — expected. |
+| Netlify build can't find package.json | Base directory must be `ecommerce-app/client` / `admin-app/client`, not the repo root. |

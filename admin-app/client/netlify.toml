@@ -1,0 +1,19 @@
+# Netlify config for the ShopKart admin dashboard SPA.
+# In Netlify, set this site's "Base directory" to: admin-app/client
+# (command/publish below are relative to that base).
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+  [build.environment]
+    # Baked into the build at compile time. Point at the admin API on Render.
+    # Change here (or override in Netlify UI → Site settings → Environment) if the
+    # Render URL differs, then trigger a redeploy.
+    VITE_API_URL = "https://shopkart-admin-api.onrender.com/api"
+
+# SPA fallback so client-side routes work on refresh.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

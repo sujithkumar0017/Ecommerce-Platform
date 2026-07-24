@@ -1,26 +1,24 @@
 # ============================================================================
-#  ShopKart — Render Blueprint (free tier)
-#  Provisions all five pieces from one file:
+#  ShopKart — Render Blueprint (BACKENDS + DATABASE only; free tier)
+#
+#  Architecture: the two React frontends deploy to NETLIFY; the two Express
+#  APIs and the shared PostgreSQL run here on Render. This file provisions:
 #    * shopkart-db            PostgreSQL (shared by both APIs)
 #    * shopkart-ecommerce-api Express API   (ecommerce-app/server)
 #    * shopkart-admin-api     Express API   (admin-app/server)
-#    * shopkart-ecommerce-web React SPA      (ecommerce-app/client)
-#    * shopkart-admin-web     React SPA      (admin-app/client)
+#  (The frontends are configured via ecommerce-app/client/netlify.toml and
+#   admin-app/client/netlify.toml — see DEPLOY.md.)
 #
-#  Deploy: push this repo to GitHub, then in Render → New → Blueprint → pick
-#  the repo. Render reads this file and creates everything.
+#  Deploy: push to GitHub, then Render → New → Blueprint → pick the repo.
 #
-#  IMPORTANT — the four *.onrender.com URLs below are PREDICTIONS based on the
-#  service names. If Render appends a random suffix (because a name is taken),
-#  update CLIENT_URL / VITE_API_URL / ECOMMERCE_APP_URL to the real URLs shown
-#  in the dashboard and click "Manual Deploy" on the affected service.
-#  (VITE_API_URL is baked into the SPA at build time, so a change needs a rebuild.)
+#  IMPORTANT — CLIENT_URL below must equal your NETLIFY site URLs (used for CORS).
+#  The values here are PREDICTIONS; after you create the Netlify sites, set the
+#  real URLs and Render will restart the APIs automatically. Likewise, the APIs'
+#  own *.onrender.com URLs go into the Netlify VITE_API_URL settings.
 #
 #  Free-tier notes:
 #    * Web services sleep after ~15 min idle; first request then wakes them (~30-50s).
-#    * Free Postgres is deleted after 30 days. For a permanent free DB, create a
-#      Neon project (https://neon.tech), delete the `databases:` block below, and
-#      set DATABASE_URL on both APIs to the Neon connection string instead.
+#    * Free Postgres is deleted after 30 days (fine for a sub-month test).
 # ============================================================================
 
 databases:
@@ -54,7 +52,7 @@ services:
           name: shopkart-db
           property: connectionString
       - key: CLIENT_URL
-        value: https://shopkart-ecommerce-web.onrender.com
+        value: https://shopkart-ecommerce.netlify.app
 
   # ──────────────────────────────  ADMIN API  ──────────────────────────────
   - type: web
@@ -79,37 +77,9 @@ services:
           name: shopkart-db
           property: connectionString
       - key: CLIENT_URL
-        value: https://shopkart-admin-web.onrender.com
+        value: https://shopkart-admin.netlify.app
       - key: ECOMMERCE_APP_URL
-        value: https://shopkart-ecommerce-web.onrender.com
+        value: https://shopkart-ecommerce.netlify.app
 
-  # ───────────────────────────  ECOMMERCE FRONTEND  ─────────────────────────
-  - type: web
-    name: shopkart-ecommerce-web
-    runtime: static
-    rootDir: ecommerce-app/client
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    envVars:
-      - key: VITE_API_URL
-        value: https://shopkart-ecommerce-api.onrender.com/api
-    # SPA fallback so client-side routes (e.g. /products/1) work on refresh.
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-
-  # ─────────────────────────────  ADMIN FRONTEND  ──────────────────────────
-  - type: web
-    name: shopkart-admin-web
-    runtime: static
-    rootDir: admin-app/client
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    envVars:
-      - key: VITE_API_URL
-        value: https://shopkart-admin-api.onrender.com/api
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+  # Frontends are NOT here — they deploy to Netlify (see the netlify.toml files
+  # in ecommerce-app/client and admin-app/client, and DEPLOY.md).
