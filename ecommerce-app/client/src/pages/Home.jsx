@@ -45,10 +45,12 @@ export default function Home() {
   return (
     <div className="container">
       {/* Hero — quiet, spacious, imagery takes centre stage */}
-      <section className="hero reveal" aria-labelledby="hero-title">
+      <section className="hero flow-bg reveal" aria-labelledby="hero-title">
         <div className="hero-content">
           <span className="eyebrow">New season</span>
-          <h1 id="hero-title">Discover premium picks that inspire.</h1>
+          <h1 id="hero-title">
+            Discover <span className="copper">premium</span> picks that <span className="copper">inspire.</span>
+          </h1>
           <p>
             Considered essentials across electronics, apparel and home — delivered fast,
             with free shipping on orders over ₹999.
@@ -112,8 +114,8 @@ export default function Home() {
         </section>
       )}
 
-      {/* New arrivals */}
-      <section className="section">
+      {/* New arrivals — sits on a full-bleed wash of the signature pattern */}
+      <section className="band">
         <SectionHead title="New arrivals" sub="Fresh additions to the store." to="/products?sort=newest" />
         {loading
           ? <SkeletonGrid count={8} />
