@@ -284,7 +284,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .price { font-weight: 800; font-size: 16px; letter-spacing: -0.02em; color: var(--ink); }
 
 /* ─────────────────────────────  BADGES / STATUS  ───────────────────────────── */
-.badge { font-size: 12px; padding: 4px 11px; border-radius: var(--r-pill); font-weight: 700; display: inline-flex; align-items: center; gap: 5px; line-height: 1.35; }
+.badge { font-size: 12px; padding: 4px 11px; border-radius: var(--r-pill); font-weight: 700; display: inline-flex; align-items: center; gap: 5px; line-height: 1.35; white-space: nowrap; flex: none; }
 .badge.stock { background: var(--success-soft); color: var(--success); }
 .badge.out { background: var(--error-soft); color: var(--error); }
 .badge.stock::before, .badge.out::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
