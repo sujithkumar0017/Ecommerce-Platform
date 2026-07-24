@@ -1,0 +1,115 @@
+# ============================================================================
+#  ShopKart — Render Blueprint (free tier)
+#  Provisions all five pieces from one file:
+#    * shopkart-db            PostgreSQL (shared by both APIs)
+#    * shopkart-ecommerce-api Express API   (ecommerce-app/server)
+#    * shopkart-admin-api     Express API   (admin-app/server)
+#    * shopkart-ecommerce-web React SPA      (ecommerce-app/client)
+#    * shopkart-admin-web     React SPA      (admin-app/client)
+#
+#  Deploy: push this repo to GitHub, then in Render → New → Blueprint → pick
+#  the repo. Render reads this file and creates everything.
+#
+#  IMPORTANT — the four *.onrender.com URLs below are PREDICTIONS based on the
+#  service names. If Render appends a random suffix (because a name is taken),
+#  update CLIENT_URL / VITE_API_URL / ECOMMERCE_APP_URL to the real URLs shown
+#  in the dashboard and click "Manual Deploy" on the affected service.
+#  (VITE_API_URL is baked into the SPA at build time, so a change needs a rebuild.)
+#
+#  Free-tier notes:
+#    * Web services sleep after ~15 min idle; first request then wakes them (~30-50s).
+#    * Free Postgres is deleted after 30 days. For a permanent free DB, create a
+#      Neon project (https://neon.tech), delete the `databases:` block below, and
+#      set DATABASE_URL on both APIs to the Neon connection string instead.
+# ============================================================================
+
+databases:
+  - name: shopkart-db
+    databaseName: shopkart
+    user: shopkart
+    plan: free
+
+services:
+  # ────────────────────────────  ECOMMERCE API  ────────────────────────────
+  - type: web
+    name: shopkart-ecommerce-api
+    runtime: node
+    plan: free
+    rootDir: ecommerce-app
+    # db:migrate is idempotent (CREATE TABLE IF NOT EXISTS) — safe on every deploy.
+    buildCommand: npm install && npm run db:migrate
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shopkart-db
+          property: connectionString
+      - key: CLIENT_URL
+        value: https://shopkart-ecommerce-web.onrender.com
+
+  # ──────────────────────────────  ADMIN API  ──────────────────────────────
+  - type: web
+    name: shopkart-admin-api
+    runtime: node
+    plan: free
+    rootDir: admin-app
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shopkart-db
+          property: connectionString
+      - key: CLIENT_URL
+        value: https://shopkart-admin-web.onrender.com
+      - key: ECOMMERCE_APP_URL
+        value: https://shopkart-ecommerce-web.onrender.com
+
+  # ───────────────────────────  ECOMMERCE FRONTEND  ─────────────────────────
+  - type: web
+    name: shopkart-ecommerce-web
+    runtime: static
+    rootDir: ecommerce-app/client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://shopkart-ecommerce-api.onrender.com/api
+    # SPA fallback so client-side routes (e.g. /products/1) work on refresh.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  # ─────────────────────────────  ADMIN FRONTEND  ──────────────────────────
+  - type: web
+    name: shopkart-admin-web
+    runtime: static
+    rootDir: admin-app/client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://shopkart-admin-api.onrender.com/api
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

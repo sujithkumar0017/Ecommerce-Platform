@@ -1,0 +1,1766 @@
+openapi: 3.1.0
+
+# ============================================================================
+#  ShopKart E-Commerce Storefront API — OpenAPI 3.1 specification
+#  Generated from the live Express implementation in ecommerce-app/server.
+#
+#  Fidelity notes (intentional deviations from a generic template, so this
+#  document matches the REAL wire behaviour and is usable without the source):
+#   * JSON property names are snake_case (as the API emits them), NOT camelCase.
+#   * The error body is a flat  { "error": "<message>" }  object — the server
+#     does not wrap errors in a success/code/details envelope.
+#   * Monetary and rating fields are PostgreSQL NUMERIC values, which the
+#     driver serialises as DECIMAL STRINGS (e.g. "25.50"), not JSON numbers.
+#     Consumers must parse them. Counts cast to ::int are true integers.
+# ============================================================================
+
+info:
+  title: ShopKart E-Commerce Storefront API
+  version: 1.0.0
+  summary: Customer-facing storefront API for the ShopKart e-commerce application.
+  description: |
+    REST API powering the ShopKart storefront: authentication, profile & address
+    management, product catalogue browsing, cart & coupon handling, checkout /
+    orders, and verified product reviews.
+
+    ## Authentication
+    Stateless **JWT Bearer** tokens. Obtain a token from `POST /api/auth/signup`
+    or `POST /api/auth/login`, then send it as `Authorization: Bearer <token>`.
+    Tokens expire after 7 days (configurable via `JWT_EXPIRES_IN`). Logout is
+    client-side (drop the token); `POST /api/auth/logout` is a no-op convenience.
+
+    ## Core domain rule
+    A purchase is recorded immutably as `user -> order -> order_items`. Each
+    `order_item` snapshots the product name, variant name, SKU and unit price
+    paid at that time, so order history never changes if a product is later
+    renamed, repriced or archived.
+
+    ## Pricing
+    - Tax: 8% of `(subtotal - discount)`.
+    - Shipping: flat ₹49, waived when `subtotal >= ₹999` (or cart is empty).
+    - Coupons: `percent` (optionally capped via `max_discount`) or `fixed`.
+
+    ## Conventions
+    - All request and response bodies are `application/json` unless noted.
+    - All monetary values are in INR (₹).
+    - Timestamps are RFC 3339 / ISO 8601 date-time in UTC.
+  contact:
+    name: ShopKart API Support
+    email: sujith.tesark@gmail.com
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server (default PORT=3000)
+  # Only the development server is defined because staging/production URLs are
+  # not part of the current project configuration. Add them here when available:
+  #   - url: https://staging.your-domain.tld
+  #   - url: https://api.your-domain.tld
+
+tags:
+  - name: System
+    description: Service health and readiness checks.
+  - name: Authentication
+    description: Sign up, log in, log out and identity of the current user.
+  - name: Profile
+    description: Read and update the authenticated user's profile.
+  - name: Addresses
+    description: Manage the authenticated user's saved delivery addresses.
+  - name: Products
+    description: Public product catalogue — browse, search, filter, sort and detail.
+  - name: Cart
+    description: The authenticated user's shopping cart and coupon application.
+  - name: Orders
+    description: Place orders from the cart, pay (mock), track, and cancel.
+  - name: Reviews
+    description: Read product reviews; write/edit reviews for delivered purchases.
+
+# Applied globally; individual public operations override with `security: []`.
+security:
+  - bearerAuth: []
+
+paths:
+  # ───────────────────────────────  SYSTEM  ───────────────────────────────
+  /api/health:
+    get:
+      tags: [System]
+      summary: Health & database connectivity check
+      description: Verifies the API is up and can reach PostgreSQL. Public.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Service healthy and database reachable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthOk' }
+              example: { ok: true, db: connected }
+        '500':
+          description: Database unreachable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthError' }
+              example: { ok: false, db: error, message: 'connection refused' }
+
+  # ───────────────────────────────  AUTH  ───────────────────────────────
+  /api/auth/signup:
+    post:
+      tags: [Authentication]
+      summary: Register a new customer account
+      description: Creates a `customer` account and returns the user plus a JWT.
+      operationId: signup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+            example:
+              name: Aarav Sharma
+              email: aarav@example.com
+              phone: '+919812345678'
+              password: 's3cur3pass'
+      responses:
+        '201':
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+              example:
+                user:
+                  id: 42
+                  name: Aarav Sharma
+                  email: aarav@example.com
+                  phone: '+919812345678'
+                  role: customer
+                  created_at: '2026-07-24T10:30:00Z'
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Log in with email and password
+      description: Authenticates a user and returns the user plus a fresh JWT.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: aarav@example.com, password: 's3cur3pass' }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+              example:
+                user:
+                  id: 42
+                  name: Aarav Sharma
+                  email: aarav@example.com
+                  phone: '+919812345678'
+                  role: customer
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Incorrect email or password.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Incorrect email or password. }
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Log out (client drops the token)
+      description: |
+        JWTs are stateless, so this endpoint simply acknowledges the logout.
+        The client is responsible for discarding the stored token.
+      operationId: logout
+      security: []
+      responses:
+        '200':
+          description: Logout acknowledged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+                  message: { type: string }
+              example: { ok: true, message: 'Logged out.' }
+
+  /api/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get the currently authenticated user
+      description: Returns the profile of the user identified by the Bearer token.
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ───────────────────────────────  PROFILE  ───────────────────────────────
+  /api/profile:
+    get:
+      tags: [Profile]
+      summary: Get my profile
+      operationId: getProfile
+      responses:
+        '200':
+          description: The authenticated user's profile.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [Profile]
+      summary: Update my profile (name & phone)
+      description: Email is immutable and cannot be changed via this endpoint.
+      operationId: updateProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileUpdateRequest' }
+            example: { name: Aarav S. Sharma, phone: '+919800000000' }
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ───────────────────────────────  ADDRESSES  ───────────────────────────────
+  /api/addresses:
+    get:
+      tags: [Addresses]
+      summary: List my saved addresses
+      description: Ordered by default first, then most recently created.
+      operationId: listAddresses
+      responses:
+        '200':
+          description: Saved addresses.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [addresses]
+                properties:
+                  addresses:
+                    type: array
+                    items: { $ref: '#/components/schemas/Address' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Addresses]
+      summary: Add a new address
+      description: |
+        The first address a user creates becomes the default automatically.
+        Setting `is_default: true` unsets the default flag on all other addresses.
+      operationId: createAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddressInput' }
+            example:
+              label: Home
+              recipient_name: Aarav Sharma
+              phone: '+919812345678'
+              line1: 12 Residency Road
+              line2: Apt 4B
+              city: Bengaluru
+              state: Karnataka
+              postal_code: '560025'
+              country: India
+              is_default: true
+      responses:
+        '201':
+          description: Address created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [address]
+                properties:
+                  address: { $ref: '#/components/schemas/Address' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/addresses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/AddressId'
+    put:
+      tags: [Addresses]
+      summary: Update an address
+      operationId: updateAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddressInput' }
+      responses:
+        '200':
+          description: Address updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [address]
+                properties:
+                  address: { $ref: '#/components/schemas/Address' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Addresses]
+      summary: Delete an address
+      operationId: deleteAddress
+      responses:
+        '200':
+          description: Address deleted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+              example: { ok: true }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/addresses/{id}/default:
+    parameters:
+      - $ref: '#/components/parameters/AddressId'
+    put:
+      tags: [Addresses]
+      summary: Set an address as the default
+      description: Marks this address as default and clears the flag on all others.
+      operationId: setDefaultAddress
+      responses:
+        '200':
+          description: Default updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+              example: { ok: true }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ───────────────────────────────  PRODUCTS  ───────────────────────────────
+  /api/products:
+    get:
+      tags: [Products]
+      summary: Browse, search, filter and sort products
+      description: |
+        Returns active (non-archived) products, each decorated with price range,
+        aggregate rating, total stock across variants, and a primary image.
+        Supports full-text-ish search (`q`), category and price/rating/stock
+        filters, sorting and simple page-based pagination.
+      operationId: listProducts
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+        - $ref: '#/components/parameters/CategoryFilter'
+        - $ref: '#/components/parameters/MinPrice'
+        - $ref: '#/components/parameters/MaxPrice'
+        - $ref: '#/components/parameters/MinRating'
+        - $ref: '#/components/parameters/InStock'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of products.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductListResponse' }
+              example:
+                products:
+                  - id: 1
+                    name: Aurora Wireless Headphones
+                    slug: aurora-wireless-headphones
+                    category: Electronics
+                    brand: Aurora
+                    description: Over-ear ANC headphones with 40h battery.
+                    is_archived: false
+                    created_at: '2026-07-01T09:00:00Z'
+                    min_price: '4999.00'
+                    max_price: '5999.00'
+                    total_stock: '37'
+                    avg_rating: '4.60'
+                    review_count: '18'
+                    image: https://cdn.example.com/products/aurora-1.jpg
+                page: 1
+                limit: 24
+
+  /api/products/categories:
+    get:
+      tags: [Products]
+      summary: List categories with product counts
+      operationId: listCategories
+      security: []
+      responses:
+        '200':
+          description: Distinct categories and how many active products each has.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+              example:
+                categories:
+                  - { category: Apparel, count: 24 }
+                  - { category: Electronics, count: 41 }
+                  - { category: Home & Kitchen, count: 17 }
+
+  /api/products/{idOrSlug}:
+    get:
+      tags: [Products]
+      summary: Get a single product by numeric id or slug
+      description: |
+        Accepts either a numeric product `id` or a URL `slug`. Returns the
+        product with its images, active variants, reviews and aggregate rating.
+      operationId: getProduct
+      security: []
+      parameters:
+        - name: idOrSlug
+          in: path
+          required: true
+          description: Numeric product id (e.g. `12`) or product slug (e.g. `aurora-wireless-headphones`).
+          schema:
+            type: string
+          examples:
+            byId: { value: '12', summary: By numeric id }
+            bySlug: { value: aurora-wireless-headphones, summary: By slug }
+      responses:
+        '200':
+          description: Product detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product]
+                properties:
+                  product: { $ref: '#/components/schemas/ProductDetail' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/products/{productId}/reviews:
+    get:
+      tags: [Reviews]
+      summary: List reviews for a product
+      description: Public list of a product's reviews, newest first.
+      operationId: listProductReviews
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: The product's reviews.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reviews]
+                properties:
+                  reviews:
+                    type: array
+                    items: { $ref: '#/components/schemas/Review' }
+              example:
+                reviews:
+                  - id: 5
+                    rating: 5
+                    title: Fantastic sound
+                    body: Battery really does last all week.
+                    created_at: '2026-07-20T14:12:00Z'
+                    updated_at: '2026-07-20T14:12:00Z'
+                    author: Aarav Sharma
+
+  # ───────────────────────────────  CART  ───────────────────────────────
+  /api/cart:
+    get:
+      tags: [Cart]
+      summary: Get my cart (optionally previewing a coupon)
+      description: |
+        Returns the current cart with line items and computed totals. Passing
+        `?coupon=CODE` previews the discount; an invalid code is reported in the
+        `coupon_error` field (HTTP still 200) rather than as an error response.
+      operationId: getCart
+      parameters:
+        - $ref: '#/components/parameters/CouponQuery'
+      responses:
+        '200':
+          description: The cart with totals.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+              example:
+                cart_id: 7
+                items:
+                  - cart_item_id: 31
+                    quantity: 2
+                    variant_id: 108
+                    sku: AUR-HP-BLK
+                    variant_name: Black
+                    unit_price: '4999.00'
+                    stock: 12
+                    is_active: true
+                    product_id: 1
+                    product_name: Aurora Wireless Headphones
+                    image: https://cdn.example.com/products/aurora-1.jpg
+                coupon: { code: WELCOME10, description: 10% off your first order }
+                coupon_error: null
+                subtotal: '9998.00'
+                discount: '999.80'
+                tax: '719.86'
+                shipping_fee: '0'
+                total: '9718.06'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [Cart]
+      summary: Clear the cart
+      operationId: clearCart
+      responses:
+        '200':
+          description: The now-empty cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/cart/items:
+    post:
+      tags: [Cart]
+      summary: Add an item to the cart
+      description: |
+        Adds `quantity` of a variant. If the variant is already in the cart the
+        quantities are combined. The combined quantity may not exceed available
+        stock.
+      operationId: addCartItem
+      parameters:
+        - $ref: '#/components/parameters/CouponQuery'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CartItemAddRequest' }
+            example: { variant_id: 108, quantity: 2 }
+      responses:
+        '201':
+          description: Item added; returns the updated cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+        '400':
+          description: Invalid input or requested quantity exceeds stock.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                invalid: { value: { error: 'A valid variant and quantity are required.' } }
+                stock: { value: { error: 'Only 3 in stock.' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The variant does not exist or is inactive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'That product option is unavailable.' }
+
+  /api/cart/items/{variantId}:
+    parameters:
+      - $ref: '#/components/parameters/VariantId'
+      - $ref: '#/components/parameters/CouponQuery'
+    put:
+      tags: [Cart]
+      summary: Update a cart item's quantity
+      operationId: updateCartItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CartItemUpdateRequest' }
+            example: { quantity: 3 }
+      responses:
+        '200':
+          description: Quantity updated; returns the updated cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+        '400':
+          description: Quantity invalid or exceeds stock.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                invalid: { value: { error: 'Quantity must be at least 1.' } }
+                stock: { value: { error: 'Only 3 in stock.' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Variant not found, or the item is not in the cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                variant: { value: { error: 'Product option not found.' } }
+                item: { value: { error: 'Item not in cart.' } }
+    delete:
+      tags: [Cart]
+      summary: Remove a cart item
+      operationId: removeCartItem
+      responses:
+        '200':
+          description: Item removed (idempotent); returns the updated cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/cart/coupon:
+    post:
+      tags: [Cart]
+      summary: Validate and apply a coupon code
+      description: |
+        Validates the coupon against the current cart. On success returns the
+        cart with the coupon applied; on failure returns `400` with the reason
+        (expired, inactive, minimum subtotal not met, or unknown code).
+      operationId: applyCoupon
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponRequest' }
+            example: { code: WELCOME10 }
+      responses:
+        '200':
+          description: Coupon valid; returns the cart with the discount applied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cart' }
+        '400':
+          description: Coupon missing or invalid for this cart.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                empty: { value: { error: 'Enter a coupon code.' } }
+                unknown: { value: { error: 'Invalid coupon code.' } }
+                minSubtotal: { value: { error: 'Add items worth ₹999.00 to use this coupon.' } }
+                expired: { value: { error: 'This coupon has expired.' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ───────────────────────────────  ORDERS  ───────────────────────────────
+  /api/orders:
+    get:
+      tags: [Orders]
+      summary: List my orders
+      description: Order history for the authenticated user, newest first.
+      operationId: listOrders
+      responses:
+        '200':
+          description: Order history.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/OrderListItem' }
+              example:
+                orders:
+                  - id: 1001
+                    order_number: SK-2026-001001
+                    status: paid
+                    payment_status: paid
+                    total: '9718.06'
+                    placed_at: '2026-07-24T10:35:00Z'
+                    item_count: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Orders]
+      summary: Place an order from the cart
+      description: |
+        Creates an order from the current cart. Re-checks stock (locking variant
+        rows), snapshots the chosen delivery address and each line item, applies
+        an optional coupon, decrements stock and clears the cart — all in one
+        transaction. The order starts as `status: placed`, `payment_status: unpaid`.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderCreateRequest' }
+            example: { address_id: 15, coupon_code: WELCOME10 }
+      responses:
+        '201':
+          description: Order placed. Returns the new order id and number.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/OrderRef' }
+              example:
+                order: { id: 1001, order_number: SK-2026-001001 }
+        '400':
+          description: Missing address, empty cart, or invalid coupon.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                address: { value: { error: 'Please choose a delivery address.' } }
+                empty: { value: { error: 'Your cart is empty.' } }
+                coupon: { value: { error: 'Invalid coupon code.' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The delivery address was not found for this user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'Delivery address not found.' }
+        '409':
+          description: A cart item became unavailable or short on stock during checkout.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                unavailable: { value: { error: '"Aurora Wireless Headphones" is no longer available.' } }
+                stock: { value: { error: 'Only 1 of "Aurora Wireless Headphones" left in stock.' } }
+
+  /api/orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      summary: Get a single order with its line items
+      operationId: getOrder
+      responses:
+        '200':
+          description: The order and its immutable line items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/Order' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/orders/{id}/pay:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      summary: Pay for an order (mock payment)
+      description: |
+        Marks the order as paid (`payment_status: paid`, `status: paid`). This is
+        a mock payment — no real gateway is involved. Idempotency is enforced by
+        state: paying an already-paid or cancelled order returns `409`.
+      operationId: payOrder
+      responses:
+        '200':
+          description: Payment recorded; returns the updated order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/Order' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Order already paid or cancelled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                paid: { value: { error: 'This order is already paid.' } }
+                cancelled: { value: { error: 'This order was cancelled.' } }
+
+  /api/orders/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      summary: Cancel an order
+      description: |
+        Cancels an order and restocks its items. Allowed only before the order
+        ships — `shipped` and `delivered` orders cannot be cancelled.
+      operationId: cancelOrder
+      responses:
+        '200':
+          description: Order cancelled; returns the updated order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/Order' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Order already cancelled, or already shipped/delivered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                already: { value: { error: 'This order is already cancelled.' } }
+                shipped: { value: { error: 'This order has already shipped and can no longer be cancelled.' } }
+
+  /api/orders/{id}/track:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      summary: Track an order
+      description: |
+        Returns the current status, carrier/tracking number (if shipped) and a
+        chronological timeline of the milestones that have occurred.
+      operationId: trackOrder
+      responses:
+        '200':
+          description: Tracking summary and timeline.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackResponse' }
+              example:
+                order_number: SK-2026-001001
+                status: shipped
+                tracking: { carrier: BlueDart, number: BD123456789IN }
+                timeline:
+                  - { step: placed, at: '2026-07-24T10:35:00Z' }
+                  - { step: paid, at: '2026-07-24T10:36:10Z' }
+                  - { step: packed, at: '2026-07-24T15:00:00Z' }
+                  - { step: shipped, at: '2026-07-25T09:20:00Z' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ───────────────────────────────  REVIEWS  ───────────────────────────────
+  /api/reviews/eligibility/{productId}:
+    get:
+      tags: [Reviews]
+      summary: Check review eligibility for a product
+      description: |
+        Tells the client whether the authenticated user may review a product
+        (they must have received it in a `delivered` order and not already
+        reviewed it), plus any existing review and whether it is still editable.
+      operationId: getReviewEligibility
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Eligibility details.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewEligibility' }
+              examples:
+                canReview:
+                  value: { can_review: true, has_delivered: true, review: null, can_edit: false }
+                alreadyReviewed:
+                  value:
+                    can_review: false
+                    has_delivered: true
+                    can_edit: true
+                    review:
+                      id: 5
+                      product_id: 1
+                      user_id: 42
+                      order_item_id: 900
+                      rating: 5
+                      title: Fantastic sound
+                      body: Battery really does last all week.
+                      created_at: '2026-07-23T12:00:00Z'
+                      updated_at: '2026-07-23T12:00:00Z'
+                      edit_deadline: '2026-07-23T12:30:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/reviews:
+    post:
+      tags: [Reviews]
+      summary: Write a review for a delivered product
+      description: |
+        Creates a review. The user must have received the product in a
+        `delivered` order and must not have reviewed it before (one review per
+        product per user). Reviews are editable for 30 minutes after posting.
+      operationId: createReview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewCreateRequest' }
+            example: { product_id: 1, rating: 5, title: Fantastic sound, body: Battery lasts all week. }
+      responses:
+        '201':
+          description: Review created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [review]
+                properties:
+                  review: { $ref: '#/components/schemas/ReviewFull' }
+        '400':
+          description: Missing product or rating out of range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                product: { value: { error: 'Product is required.' } }
+                rating: { value: { error: 'Rating must be between 1 and 5 stars.' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The user has not received this product in a delivered order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'You can only review a product you have received in a past order.' }
+        '409':
+          description: The user has already reviewed this product.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'You have already reviewed this product.' }
+
+  /api/reviews/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ReviewId'
+    put:
+      tags: [Reviews]
+      summary: Edit my review (within the 30-minute window)
+      description: |
+        Updates the caller's own review. Only allowed before `edit_deadline`
+        (30 minutes after creation). Any omitted field keeps its current value.
+      operationId: updateReview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewUpdateRequest' }
+            example: { rating: 4, title: Great, body: Downgraded half a star for the case. }
+      responses:
+        '200':
+          description: Review updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [review]
+                properties:
+                  review: { $ref: '#/components/schemas/ReviewFull' }
+        '400':
+          description: Rating out of range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'Rating must be between 1 and 5 stars.' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The review belongs to another user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'You can only edit your own review.' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The edit window has closed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'The edit window for this review has closed.' }
+
+# ============================================================================
+#  COMPONENTS
+# ============================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT Bearer token obtained from `/api/auth/login` or `/api/auth/signup`.
+        Send as `Authorization: Bearer <token>`. Payload carries `id`, `email`,
+        `role` and `name`; expires after 7 days by default.
+
+  # ─────────────────────────────  PARAMETERS  ─────────────────────────────
+  parameters:
+    AddressId:
+      name: id
+      in: path
+      required: true
+      description: Address identifier owned by the authenticated user.
+      schema: { type: integer, format: int32, minimum: 1 }
+      example: 15
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: Order identifier owned by the authenticated user.
+      schema: { type: integer, format: int32, minimum: 1 }
+      example: 1001
+    VariantId:
+      name: variantId
+      in: path
+      required: true
+      description: Product variant (SKU) identifier.
+      schema: { type: integer, format: int32, minimum: 1 }
+      example: 108
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      description: Numeric product identifier.
+      schema: { type: integer, format: int32, minimum: 1 }
+      example: 1
+    ReviewId:
+      name: id
+      in: path
+      required: true
+      description: Review identifier.
+      schema: { type: integer, format: int32, minimum: 1 }
+      example: 5
+    CouponQuery:
+      name: coupon
+      in: query
+      required: false
+      description: Optional coupon code to preview against the cart totals.
+      schema: { type: string }
+      example: WELCOME10
+    SearchQuery:
+      name: q
+      in: query
+      required: false
+      description: Case-insensitive keyword matched against product name, description and brand.
+      schema: { type: string }
+      example: headphones
+    CategoryFilter:
+      name: category
+      in: query
+      required: false
+      description: Exact category name to filter by (see `/api/products/categories`).
+      schema: { type: string }
+      example: Electronics
+    MinPrice:
+      name: min_price
+      in: query
+      required: false
+      description: Minimum product price (INR), inclusive.
+      schema: { type: number, minimum: 0 }
+      example: 1000
+    MaxPrice:
+      name: max_price
+      in: query
+      required: false
+      description: Maximum product price (INR), inclusive.
+      schema: { type: number, minimum: 0 }
+      example: 6000
+    MinRating:
+      name: min_rating
+      in: query
+      required: false
+      description: Minimum average rating, inclusive.
+      schema: { type: number, minimum: 0, maximum: 5 }
+      example: 4
+    InStock:
+      name: in_stock
+      in: query
+      required: false
+      description: When `true`, only products with total stock greater than zero are returned.
+      schema: { type: string, enum: ['true', 'false'] }
+      example: 'true'
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: Sort order. Defaults to `newest` when omitted or unrecognised.
+      schema:
+        type: string
+        enum: [price_asc, price_desc, newest, rating]
+        default: newest
+      example: rating
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 1-based page number.
+      schema: { type: integer, format: int32, minimum: 1, default: 1 }
+      example: 1
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Clamped server-side to the range 1–100.
+      schema: { type: integer, format: int32, minimum: 1, maximum: 100, default: 24 }
+      example: 24
+
+  # ─────────────────────────────  RESPONSES  ─────────────────────────────
+  responses:
+    BadRequest:
+      description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: 'Name, email, and password are required.' }
+    Unauthorized:
+      description: Authentication is required or the token is invalid/expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            missing: { value: { error: 'Please log in to continue.' } }
+            expired: { value: { error: 'Your session has expired. Please log in again.' } }
+    NotFound:
+      description: The requested resource does not exist (or is not owned by the caller).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: 'Not found.' }
+    Conflict:
+      description: The request conflicts with the current state of the resource.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: 'An account with this email already exists.' }
+    InternalServerError:
+      description: An unexpected error occurred on the server.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: 'Something went wrong. Please try again.' }
+
+  # ─────────────────────────────  SCHEMAS  ─────────────────────────────
+  schemas:
+
+    Error:
+      type: object
+      description: |
+        Standard error body returned by every failing endpoint. The API returns
+        a single human-readable `error` message (no code/details envelope).
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: Human-readable, client-safe error message.
+          example: 'Please log in to continue.'
+
+    OkResponse:
+      type: object
+      description: Generic success acknowledgement.
+      required: [ok]
+      properties:
+        ok: { type: boolean, const: true }
+
+    HealthOk:
+      type: object
+      required: [ok, db]
+      properties:
+        ok: { type: boolean, const: true }
+        db: { type: string, const: connected }
+
+    HealthError:
+      type: object
+      required: [ok, db]
+      properties:
+        ok: { type: boolean, const: false }
+        db: { type: string, const: error }
+        message: { type: string }
+
+    # ── Money / decimal helper ────────────────────────────────────────────
+    DecimalString:
+      type: string
+      description: |
+        A fixed-precision decimal serialised as a string (PostgreSQL NUMERIC).
+        Parse before arithmetic. Two decimal places for currency.
+      pattern: '^-?\d+(\.\d+)?$'
+      example: '4999.00'
+
+    # ── Users & auth ──────────────────────────────────────────────────────
+    User:
+      type: object
+      description: A registered user. The password hash is never returned.
+      required: [id, name, email, role]
+      properties:
+        id: { type: integer, format: int32, readOnly: true, example: 42 }
+        name: { type: string, example: Aarav Sharma }
+        email: { type: string, format: email, example: aarav@example.com }
+        phone:
+          type: [string, 'null']
+          description: Optional contact phone.
+          example: '+919812345678'
+        role:
+          type: string
+          enum: [customer, admin]
+          default: customer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          example: '2026-07-24T10:30:00Z'
+
+    SignupRequest:
+      type: object
+      required: [name, email, password]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Aarav Sharma
+        email:
+          type: string
+          format: email
+          description: Must be unique; stored lower-cased.
+          pattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+          example: aarav@example.com
+        phone:
+          type: [string, 'null']
+          example: '+919812345678'
+        password:
+          type: string
+          format: password
+          minLength: 6
+          writeOnly: true
+          example: 's3cur3pass'
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, example: aarav@example.com }
+        password: { type: string, format: password, writeOnly: true, example: 's3cur3pass' }
+
+    AuthResponse:
+      type: object
+      required: [user, token]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        token:
+          type: string
+          description: 'Signed JWT to send as `Authorization: Bearer <token>`.'
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    ProfileUpdateRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, example: Aarav S. Sharma }
+        phone:
+          type: [string, 'null']
+          example: '+919800000000'
+
+    # ── Addresses ─────────────────────────────────────────────────────────
+    Address:
+      type: object
+      required: [id, user_id, recipient_name, phone, line1, city, state, postal_code, country, is_default]
+      properties:
+        id: { type: integer, format: int32, readOnly: true, example: 15 }
+        user_id: { type: integer, format: int32, readOnly: true, example: 42 }
+        label:
+          type: [string, 'null']
+          description: Friendly name such as "Home" or "Work".
+          example: Home
+        recipient_name: { type: string, example: Aarav Sharma }
+        phone: { type: string, example: '+919812345678' }
+        line1: { type: string, example: 12 Residency Road }
+        line2:
+          type: [string, 'null']
+          example: Apt 4B
+        city: { type: string, example: Bengaluru }
+        state: { type: string, example: Karnataka }
+        postal_code: { type: string, example: '560025' }
+        country: { type: string, default: India, example: India }
+        is_default: { type: boolean, example: true }
+        created_at: { type: string, format: date-time, readOnly: true, example: '2026-07-24T10:30:00Z' }
+
+    AddressInput:
+      type: object
+      required: [recipient_name, phone, line1, city, state, postal_code]
+      additionalProperties: false
+      properties:
+        label: { type: [string, 'null'], example: Home }
+        recipient_name: { type: string, minLength: 1, example: Aarav Sharma }
+        phone: { type: string, minLength: 1, example: '+919812345678' }
+        line1: { type: string, minLength: 1, example: 12 Residency Road }
+        line2: { type: [string, 'null'], example: Apt 4B }
+        city: { type: string, minLength: 1, example: Bengaluru }
+        state: { type: string, minLength: 1, example: Karnataka }
+        postal_code: { type: string, minLength: 1, example: '560025' }
+        country: { type: string, default: India, example: India }
+        is_default:
+          type: boolean
+          default: false
+          description: Setting `true` clears the default flag on all other addresses.
+          example: true
+
+    # ── Products ──────────────────────────────────────────────────────────
+    Category:
+      type: object
+      required: [category, count]
+      properties:
+        category: { type: string, example: Electronics }
+        count:
+          type: integer
+          format: int32
+          description: Number of active products in this category.
+          example: 41
+
+    ProductListItem:
+      type: object
+      description: A product decorated with aggregate price/rating/stock and a primary image.
+      required: [id, name, category, is_archived, min_price, max_price, total_stock, avg_rating, review_count]
+      properties:
+        id: { type: integer, format: int32, example: 1 }
+        name: { type: string, example: Aurora Wireless Headphones }
+        slug: { type: [string, 'null'], example: aurora-wireless-headphones }
+        category: { type: string, example: Electronics }
+        brand: { type: [string, 'null'], example: Aurora }
+        description: { type: [string, 'null'], example: Over-ear ANC headphones with 40h battery. }
+        is_archived: { type: boolean, example: false }
+        created_at: { type: string, format: date-time, example: '2026-07-01T09:00:00Z' }
+        min_price: { $ref: '#/components/schemas/DecimalString' }
+        max_price: { $ref: '#/components/schemas/DecimalString' }
+        total_stock:
+          type: string
+          description: Sum of stock across active variants (NUMERIC/bigint as string).
+          example: '37'
+        avg_rating: { $ref: '#/components/schemas/DecimalString' }
+        review_count:
+          type: string
+          description: Number of reviews (bigint serialised as string).
+          example: '18'
+        image:
+          type: [string, 'null']
+          format: uri
+          description: URL of the primary product image, or null if none.
+          example: https://cdn.example.com/products/aurora-1.jpg
+
+    ProductImage:
+      type: object
+      required: [id, url, position]
+      properties:
+        id: { type: integer, format: int32, example: 501 }
+        url: { type: string, format: uri, example: https://cdn.example.com/products/aurora-1.jpg }
+        position: { type: integer, format: int32, description: Display order (ascending)., example: 0 }
+
+    ProductVariant:
+      type: object
+      description: A purchasable SKU of a product.
+      required: [id, sku, variant_name, attributes, price, stock, is_active]
+      properties:
+        id: { type: integer, format: int32, example: 108 }
+        sku: { type: string, example: AUR-HP-BLK }
+        variant_name: { type: string, default: Default, example: Black }
+        attributes:
+          type: object
+          description: Free-form key/value attributes (e.g. size, colour).
+          additionalProperties: true
+          example: { color: Black, edition: Standard }
+        price: { $ref: '#/components/schemas/DecimalString' }
+        stock: { type: integer, format: int32, minimum: 0, example: 12 }
+        is_active: { type: boolean, example: true }
+
+    Review:
+      type: object
+      description: Public-facing review (author name only).
+      required: [id, rating, created_at, author]
+      properties:
+        id: { type: integer, format: int32, example: 5 }
+        rating: { type: integer, minimum: 1, maximum: 5, example: 5 }
+        title: { type: [string, 'null'], example: Fantastic sound }
+        body: { type: [string, 'null'], example: Battery really does last all week. }
+        created_at: { type: string, format: date-time, example: '2026-07-20T14:12:00Z' }
+        updated_at: { type: string, format: date-time, example: '2026-07-20T14:12:00Z' }
+        author: { type: string, description: Display name of the reviewer., example: Aarav Sharma }
+
+    ReviewFull:
+      type: object
+      description: Full review row returned to the owner on create/edit.
+      required: [id, product_id, user_id, rating, created_at, updated_at, edit_deadline]
+      properties:
+        id: { type: integer, format: int32, example: 5 }
+        product_id: { type: integer, format: int32, example: 1 }
+        user_id: { type: integer, format: int32, example: 42 }
+        order_item_id: { type: [integer, 'null'], format: int32, description: The delivered order item that entitles this review., example: 900 }
+        rating: { type: integer, minimum: 1, maximum: 5, example: 5 }
+        title: { type: [string, 'null'], example: Fantastic sound }
+        body: { type: [string, 'null'], example: Battery really does last all week. }
+        created_at: { type: string, format: date-time, example: '2026-07-23T12:00:00Z' }
+        updated_at: { type: string, format: date-time, example: '2026-07-23T12:00:00Z' }
+        edit_deadline:
+          type: string
+          format: date-time
+          description: After this instant the review can no longer be edited (30 min after creation).
+          example: '2026-07-23T12:30:00Z'
+
+    ProductDetail:
+      type: object
+      description: Full product with images, active variants, reviews and aggregates.
+      required: [id, name, category, base_price, is_archived, images, variants, reviews, avg_rating, review_count]
+      properties:
+        id: { type: integer, format: int32, example: 1 }
+        name: { type: string, example: Aurora Wireless Headphones }
+        slug: { type: [string, 'null'], example: aurora-wireless-headphones }
+        description: { type: [string, 'null'], example: Over-ear ANC headphones with 40h battery. }
+        category: { type: string, example: Electronics }
+        brand: { type: [string, 'null'], example: Aurora }
+        base_price: { $ref: '#/components/schemas/DecimalString' }
+        is_archived: { type: boolean, example: false }
+        created_at: { type: string, format: date-time, example: '2026-07-01T09:00:00Z' }
+        images:
+          type: array
+          items: { $ref: '#/components/schemas/ProductImage' }
+        variants:
+          type: array
+          items: { $ref: '#/components/schemas/ProductVariant' }
+        reviews:
+          type: array
+          items: { $ref: '#/components/schemas/Review' }
+        avg_rating: { $ref: '#/components/schemas/DecimalString' }
+        review_count: { type: integer, format: int32, example: 18 }
+
+    ProductListResponse:
+      type: object
+      required: [products, page, limit]
+      properties:
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/ProductListItem' }
+        page: { type: integer, format: int32, description: Echoed current page., example: 1 }
+        limit: { type: integer, format: int32, description: Effective (clamped) page size., example: 24 }
+
+    # ── Cart ──────────────────────────────────────────────────────────────
+    CartItem:
+      type: object
+      required: [cart_item_id, quantity, variant_id, sku, variant_name, unit_price, stock, is_active, product_id, product_name]
+      properties:
+        cart_item_id: { type: integer, format: int32, example: 31 }
+        quantity: { type: integer, format: int32, minimum: 1, example: 2 }
+        variant_id: { type: integer, format: int32, example: 108 }
+        sku: { type: string, example: AUR-HP-BLK }
+        variant_name: { type: string, example: Black }
+        unit_price: { $ref: '#/components/schemas/DecimalString' }
+        stock: { type: integer, format: int32, minimum: 0, example: 12 }
+        is_active: { type: boolean, example: true }
+        product_id: { type: integer, format: int32, example: 1 }
+        product_name: { type: string, example: Aurora Wireless Headphones }
+        image:
+          type: [string, 'null']
+          format: uri
+          example: https://cdn.example.com/products/aurora-1.jpg
+
+    CartCoupon:
+      type: [object, 'null']
+      description: The applied coupon summary, or null if none is applied.
+      properties:
+        code: { type: string, example: WELCOME10 }
+        description: { type: [string, 'null'], example: 10% off your first order }
+
+    Cart:
+      type: object
+      required: [cart_id, items, coupon, coupon_error, subtotal, discount, tax, shipping_fee, total]
+      properties:
+        cart_id: { type: integer, format: int32, example: 7 }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CartItem' }
+        coupon: { $ref: '#/components/schemas/CartCoupon' }
+        coupon_error:
+          type: [string, 'null']
+          description: Populated (with HTTP 200) when a previewed coupon is invalid for this cart.
+          example: null
+        subtotal: { $ref: '#/components/schemas/DecimalString' }
+        discount: { $ref: '#/components/schemas/DecimalString' }
+        tax:
+          allOf: [{ $ref: '#/components/schemas/DecimalString' }]
+          description: 8% of (subtotal − discount).
+        shipping_fee:
+          allOf: [{ $ref: '#/components/schemas/DecimalString' }]
+          description: Flat ₹49, or 0 when subtotal ≥ ₹999 or cart is empty.
+        total: { $ref: '#/components/schemas/DecimalString' }
+
+    CartItemAddRequest:
+      type: object
+      required: [variant_id]
+      additionalProperties: false
+      properties:
+        variant_id: { type: integer, format: int32, minimum: 1, example: 108 }
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 1
+          description: Quantity to add; combined with any existing quantity for this variant.
+          example: 2
+
+    CartItemUpdateRequest:
+      type: object
+      required: [quantity]
+      additionalProperties: false
+      properties:
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: New absolute quantity (must not exceed available stock).
+          example: 3
+
+    CouponRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { type: string, minLength: 1, example: WELCOME10 }
+
+    # ── Orders ────────────────────────────────────────────────────────────
+    OrderCreateRequest:
+      type: object
+      required: [address_id]
+      additionalProperties: false
+      properties:
+        address_id:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Id of a delivery address owned by the user.
+          example: 15
+        coupon_code:
+          type: [string, 'null']
+          description: Optional coupon code to apply to the order.
+          example: WELCOME10
+
+    OrderRef:
+      type: object
+      description: Minimal reference returned when an order is placed.
+      required: [id, order_number]
+      properties:
+        id: { type: integer, format: int32, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+
+    OrderListItem:
+      type: object
+      required: [id, order_number, status, payment_status, total, placed_at, item_count]
+      properties:
+        id: { type: integer, format: int32, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        total: { $ref: '#/components/schemas/DecimalString' }
+        placed_at: { type: string, format: date-time, example: '2026-07-24T10:35:00Z' }
+        item_count: { type: integer, format: int32, description: Total quantity across line items., example: 2 }
+
+    OrderStatus:
+      type: string
+      description: Lifecycle status of an order.
+      enum: [placed, paid, packed, shipped, delivered, cancelled]
+      example: paid
+
+    PaymentStatus:
+      type: string
+      enum: [unpaid, paid]
+      example: paid
+
+    OrderItem:
+      type: object
+      description: Immutable snapshot of a purchased line item.
+      required: [id, product_name, variant_name, sku, unit_price, quantity, line_total]
+      properties:
+        id: { type: integer, format: int32, example: 900 }
+        product_id:
+          type: [integer, 'null']
+          format: int32
+          description: Null if the product was later deleted.
+          example: 1
+        variant_id:
+          type: [integer, 'null']
+          format: int32
+          description: Null if the variant was later deleted.
+          example: 108
+        product_name: { type: string, example: Aurora Wireless Headphones }
+        variant_name: { type: string, example: Black }
+        sku: { type: string, example: AUR-HP-BLK }
+        unit_price: { $ref: '#/components/schemas/DecimalString' }
+        quantity: { type: integer, format: int32, minimum: 1, example: 2 }
+        line_total: { $ref: '#/components/schemas/DecimalString' }
+
+    Order:
+      type: object
+      description: Full order with snapshotted address, totals, tracking and line items.
+      required: [id, order_number, user_id, status, payment_status, subtotal, discount, tax, shipping_fee, total, placed_at, items]
+      properties:
+        id: { type: integer, format: int32, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+        user_id: { type: integer, format: int32, example: 42 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        subtotal: { $ref: '#/components/schemas/DecimalString' }
+        discount: { $ref: '#/components/schemas/DecimalString' }
+        tax: { $ref: '#/components/schemas/DecimalString' }
+        shipping_fee: { $ref: '#/components/schemas/DecimalString' }
+        total: { $ref: '#/components/schemas/DecimalString' }
+        coupon_code: { type: [string, 'null'], example: WELCOME10 }
+        ship_recipient: { type: [string, 'null'], example: Aarav Sharma }
+        ship_phone: { type: [string, 'null'], example: '+919812345678' }
+        ship_line1: { type: [string, 'null'], example: 12 Residency Road }
+        ship_line2: { type: [string, 'null'], example: Apt 4B }
+        ship_city: { type: [string, 'null'], example: Bengaluru }
+        ship_state: { type: [string, 'null'], example: Karnataka }
+        ship_postal: { type: [string, 'null'], example: '560025' }
+        ship_country: { type: [string, 'null'], example: India }
+        tracking_carrier: { type: [string, 'null'], example: BlueDart }
+        tracking_number: { type: [string, 'null'], example: BD123456789IN }
+        placed_at: { type: string, format: date-time, example: '2026-07-24T10:35:00Z' }
+        paid_at: { type: [string, 'null'], format: date-time, example: '2026-07-24T10:36:10Z' }
+        packed_at: { type: [string, 'null'], format: date-time, example: '2026-07-24T15:00:00Z' }
+        shipped_at: { type: [string, 'null'], format: date-time, example: '2026-07-25T09:20:00Z' }
+        delivered_at: { type: [string, 'null'], format: date-time, example: null }
+        cancelled_at: { type: [string, 'null'], format: date-time, example: null }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+
+    TimelineStep:
+      type: object
+      required: [step, at]
+      properties:
+        step:
+          type: string
+          enum: [placed, paid, packed, shipped, delivered, cancelled]
+          example: shipped
+        at: { type: string, format: date-time, example: '2026-07-25T09:20:00Z' }
+
+    TrackResponse:
+      type: object
+      required: [order_number, status, tracking, timeline]
+      properties:
+        order_number: { type: string, example: SK-2026-001001 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        tracking:
+          type: object
+          required: [carrier, number]
+          properties:
+            carrier: { type: [string, 'null'], example: BlueDart }
+            number: { type: [string, 'null'], example: BD123456789IN }
+        timeline:
+          type: array
+          description: Milestones that have occurred, in chronological order.
+          items: { $ref: '#/components/schemas/TimelineStep' }
+
+    # ── Reviews (requests & eligibility) ──────────────────────────────────
+    ReviewEligibility:
+      type: object
+      required: [can_review, has_delivered, review, can_edit]
+      properties:
+        can_review:
+          type: boolean
+          description: True when the user has a delivered purchase and no existing review.
+          example: true
+        has_delivered:
+          type: boolean
+          description: True when the user has received this product in a delivered order.
+          example: true
+        review:
+          oneOf:
+            - { $ref: '#/components/schemas/ReviewFull' }
+            - { type: 'null' }
+          description: The user's existing review, or null.
+        can_edit:
+          type: boolean
+          description: True when an existing review is still within its edit window.
+          example: false
+
+    ReviewCreateRequest:
+      type: object
+      required: [product_id, rating]
+      additionalProperties: false
+      properties:
+        product_id: { type: integer, format: int32, minimum: 1, example: 1 }
+        rating: { type: integer, minimum: 1, maximum: 5, example: 5 }
+        title: { type: [string, 'null'], example: Fantastic sound }
+        body: { type: [string, 'null'], example: Battery really does last all week. }
+
+    ReviewUpdateRequest:
+      type: object
+      description: All fields optional; omitted fields keep their current value.
+      additionalProperties: false
+      properties:
+        rating: { type: integer, minimum: 1, maximum: 5, example: 4 }
+        title: { type: [string, 'null'], example: Great }
+        body: { type: [string, 'null'], example: Downgraded half a star for the case. }

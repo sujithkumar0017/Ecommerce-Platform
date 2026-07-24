@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+
+# Logs & OS cruft
+*.log
+.DS_Store
+Thumbs.db
+
+# Generated docs artifact (rebuild with `npx @redocly/cli build-docs`)
+ecommerce-app/swagger.html
