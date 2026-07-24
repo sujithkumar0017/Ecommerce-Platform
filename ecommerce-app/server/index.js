@@ -1,5 +1,10 @@
 import express from 'express';
 import cors from 'cors';
+import swaggerUi from 'swagger-ui-express';
+import { load as loadYaml } from 'js-yaml';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 import { config } from './config.js';
 import { pool } from './db/pool.js';
 
@@ -24,6 +29,32 @@ const corsOptions =
 
 app.use(cors(corsOptions));
 app.use(express.json());
+
+// ── API documentation (Swagger UI) ───────────────────────────────────────
+// Mounted before the routers so it is never intercepted by auth middleware.
+// Browse:  /api/docs      Raw spec:  /api/openapi.yaml
+const __dirname = dirname(fileURLToPath(import.meta.url));
+try {
+  const specPath = resolve(__dirname, '..', 'openapi.yaml');
+  const rawSpec = readFileSync(specPath, 'utf8');
+  const apiSpec = loadYaml(rawSpec);
+
+  app.get('/api/openapi.yaml', (req, res) => {
+    res.type('text/yaml').send(rawSpec);
+  });
+  app.use(
+    '/api/docs',
+    swaggerUi.serve,
+    swaggerUi.setup(apiSpec, {
+      customSiteTitle: 'ShopKart API — Docs',
+      swaggerOptions: { persistAuthorization: true },
+    })
+  );
+  console.log('API docs available at /api/docs');
+} catch (err) {
+  // Docs are non-essential — never let them stop the API from booting.
+  console.warn('Swagger docs unavailable:', err.message);
+}
 
 // Health / DB check
 app.get('/api/health', async (req, res) => {

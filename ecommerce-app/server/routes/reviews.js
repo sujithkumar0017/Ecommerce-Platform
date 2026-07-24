@@ -16,8 +16,9 @@ router.get('/products/:productId/reviews', asyncH(async (req, res) => {
   res.json({ reviews: rows });
 }));
 
-// Everything below requires auth.
-router.use(requireAuth);
+// Everything below requires auth. Applied per-route (rather than router.use)
+// so that unmatched /api/* paths fall through to the 404 handler instead of
+// being answered with a misleading 401.
 
 // Has the user actually received (delivered) this product? Returns the entitling order_item id.
 async function findDeliveredItem(userId, productId) {
@@ -31,7 +32,7 @@ async function findDeliveredItem(userId, productId) {
 }
 
 // GET /api/reviews/eligibility/:productId — can the user review, and existing review?
-router.get('/reviews/eligibility/:productId', asyncH(async (req, res) => {
+router.get('/reviews/eligibility/:productId', requireAuth, asyncH(async (req, res) => {
   const productId = req.params.productId;
   const deliveredItem = await findDeliveredItem(req.user.id, productId);
   const existing = await query(
@@ -46,7 +47,7 @@ router.get('/reviews/eligibility/:productId', asyncH(async (req, res) => {
 }));
 
 // POST /api/reviews  { product_id, rating, title?, body? }
-router.post('/reviews', asyncH(async (req, res) => {
+router.post('/reviews', requireAuth, asyncH(async (req, res) => {
   const { product_id, rating, title, body } = req.body || {};
   const r = parseInt(rating, 10);
   if (!product_id) throw badRequest('Product is required.');
@@ -70,7 +71,7 @@ router.post('/reviews', asyncH(async (req, res) => {
 }));
 
 // PUT /api/reviews/:id — edit own review within the window
-router.put('/reviews/:id', asyncH(async (req, res) => {
+router.put('/reviews/:id', requireAuth, asyncH(async (req, res) => {
   const { rating, title, body } = req.body || {};
   const { rows } = await query('SELECT * FROM reviews WHERE id = $1', [req.params.id]);
   const review = rows[0];

@@ -1,0 +1,1270 @@
+openapi: 3.1.0
+
+# ============================================================================
+#  ShopKart Admin API — OpenAPI 3.1 specification
+#  Generated from the live Express implementation in admin-app/server.
+#
+#  Fidelity notes (this documents the REAL wire behaviour):
+#   * JSON property names are snake_case, as the API emits them.
+#   * The error body is a flat  { "error": "<message>" }  object.
+#   * PostgreSQL NUMERIC values serialise as DECIMAL STRINGS ("4999.00"),
+#     not JSON numbers. Values cast to ::int are true integers.
+#   * EVERY endpoint except /api/health, /api/auth/login and /api/auth/logout
+#     requires a Bearer JWT whose payload has role="admin".
+# ============================================================================
+
+info:
+  title: ShopKart Admin API
+  version: 1.0.0
+  summary: Internal admin dashboard API — catalogue, fulfilment, traceability and reporting.
+  description: |
+    REST API powering the ShopKart **admin dashboard**. It shares the same
+    PostgreSQL database as the storefront API but is a separate service with
+    its own, admin-only authentication.
+
+    ## Authentication
+    Stateless **JWT Bearer** tokens from `POST /api/auth/login`. Unlike the
+    storefront, this API enforces `role = "admin"` on every protected route
+    (`requireAdmin`): a valid token belonging to a customer receives `403`.
+
+    ## Core domain rule
+    The user ↔ product relationship is **never** stored directly. Every trace
+    is resolved *through* `orders → order_items`, which snapshot the product
+    name, variant, SKU and price paid at purchase time. The `/api/trace/*`
+    endpoints expose this link in both directions.
+
+    ## Fulfilment state machine
+    The admin drives orders forward through allowed transitions only:
+
+    | From      | Allowed next            |
+    |-----------|-------------------------|
+    | `paid`    | `packed`, `cancelled`   |
+    | `packed`  | `shipped`, `cancelled`  |
+    | `shipped` | `delivered`             |
+
+    Moving to `shipped` requires a tracking number. Cancelling **restocks**
+    every line item. Any other transition returns `409`.
+  contact:
+    name: ShopKart API Support
+    email: sujith.tesark@gmail.com
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:4000
+    description: Local development server (default PORT=4000)
+  - url: https://shopkart-admin-api.onrender.com
+    description: Deployed admin API (Render)
+
+tags:
+  - name: System
+    description: Service health and database connectivity.
+  - name: Authentication
+    description: Admin-only login and session identity.
+  - name: Products
+    description: Catalogue management — products, archiving and images.
+  - name: Variants
+    description: Per-SKU variant management and stock adjustment.
+  - name: Orders
+    description: Order fulfilment — view all orders and drive status transitions.
+  - name: Traceability
+    description: Two-way customer ↔ product tracing, always via orders.
+  - name: Reports
+    description: Aggregate business reporting.
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ───────────────────────────────  SYSTEM  ───────────────────────────────
+  /api/health:
+    get:
+      tags: [System]
+      summary: Health & database connectivity check
+      operationId: getAdminHealth
+      security: []
+      responses:
+        '200':
+          description: Service healthy and database reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+                  db: { type: string, const: connected }
+                  app: { type: string, const: admin }
+              example: { ok: true, db: connected, app: admin }
+        '500':
+          description: Database unreachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: false }
+                  db: { type: string, const: error }
+                  message: { type: string }
+
+  # ───────────────────────────────  AUTH  ─────────────────────────────────
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Log in as an administrator
+      description: |
+        Authenticates and returns a JWT. Credentials belonging to a
+        **customer** account are rejected with `403` — this dashboard is
+        admin-only.
+      operationId: adminLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email, example: admin@shopkart.local }
+                password: { type: string, format: password, writeOnly: true, example: admin123 }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, token]
+                properties:
+                  user: { $ref: '#/components/schemas/AdminUser' }
+                  token: { type: string, description: 'Signed JWT for the Authorization header.' }
+              example:
+                user: { id: 1, name: Store Admin, email: admin@shopkart.local, role: admin }
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Incorrect email or password.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Incorrect email or password. }
+        '403':
+          description: The account exists but is not an administrator.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'This dashboard is for admins only. Customer accounts cannot log in here.' }
+
+  /api/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get the currently authenticated admin
+      operationId: getCurrentAdmin
+      responses:
+        '200':
+          description: The signed-in administrator.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/AdminUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Log out (client discards the token)
+      description: JWTs are stateless; this simply acknowledges the logout.
+      operationId: adminLogout
+      security: []
+      responses:
+        '200':
+          description: Logout acknowledged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+              example: { ok: true }
+
+  # ───────────────────────────────  PRODUCTS  ─────────────────────────────
+  /api/products:
+    get:
+      tags: [Products]
+      summary: List products (with variant counts and total stock)
+      description: Archived products are excluded unless `include_archived=true`.
+      operationId: adminListProducts
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive match against product name or brand.
+          schema: { type: string }
+          example: headphones
+        - name: category
+          in: query
+          description: Exact category to filter by.
+          schema: { type: string }
+          example: Electronics
+        - name: include_archived
+          in: query
+          description: Set to `true` to include archived products.
+          schema: { type: string, enum: ['true', 'false'], default: 'false' }
+      responses:
+        '200':
+          description: Matching products, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [products]
+                properties:
+                  products:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminProductListItem' }
+              example:
+                products:
+                  - id: 3
+                    name: Wireless Headphones
+                    category: Electronics
+                    brand: SonicWave
+                    base_price: '4499.00'
+                    is_archived: false
+                    created_at: '2026-07-23T10:00:00Z'
+                    variant_count: 2
+                    total_stock: 35
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Products]
+      summary: Create a product (optionally with an image and variants)
+      description: |
+        Creates the product and generates a unique slug. `variants` entries
+        missing a `sku` or `price` are silently skipped.
+      operationId: adminCreateProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductCreateRequest' }
+            example:
+              name: Aurora Wireless Headphones
+              description: Over-ear ANC headphones with 40h battery.
+              category: Electronics
+              brand: Aurora
+              base_price: 4999
+              image_url: https://cdn.example.com/products/aurora-1.jpg
+              variants:
+                - { sku: AUR-HP-BLK, variant_name: Black, attributes: { color: Black }, price: 4999, stock: 12 }
+      responses:
+        '201':
+          description: Product created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product]
+                properties:
+                  product: { $ref: '#/components/schemas/AdminProduct' }
+        '400':
+          description: Name and category are required.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Name and category are required. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/products/categories:
+    get:
+      tags: [Products]
+      summary: List all distinct category names
+      operationId: adminListCategories
+      responses:
+        '200':
+          description: Distinct categories, alphabetical.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories]
+                properties:
+                  categories:
+                    type: array
+                    items: { type: string }
+              example:
+                categories: [Accessories, Apparel, Electronics, Footwear, Home & Kitchen]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [Products]
+      summary: Get a product with all its variants and images
+      description: Unlike the storefront, this returns archived products and inactive variants too.
+      operationId: adminGetProduct
+      responses:
+        '200':
+          description: Full product detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product]
+                properties:
+                  product: { $ref: '#/components/schemas/AdminProductDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Products]
+      summary: Update a product's core fields
+      description: Does not modify variants, images or the archived flag.
+      operationId: adminUpdateProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductUpdateRequest' }
+            example:
+              name: Aurora Wireless Headphones
+              description: Updated copy.
+              category: Electronics
+              brand: Aurora
+              base_price: 5299
+      responses:
+        '200':
+          description: Product updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product]
+                properties:
+                  product: { $ref: '#/components/schemas/AdminProduct' }
+        '400':
+          description: Name and category are required.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/products/{id}/archive:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    patch:
+      tags: [Products]
+      summary: Archive or restore a product
+      description: |
+        Archiving hides the product from the storefront without deleting it,
+        preserving order history. Send `archived: false` to restore.
+      operationId: adminArchiveProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archived]
+              additionalProperties: false
+              properties:
+                archived: { type: boolean, description: 'true to archive, false to restore.', example: true }
+      responses:
+        '200':
+          description: Archive flag updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product]
+                properties:
+                  product:
+                    type: object
+                    properties:
+                      id: { type: integer, example: 3 }
+                      name: { type: string, example: Wireless Headphones }
+                      is_archived: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/products/{id}/variants:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    post:
+      tags: [Variants]
+      summary: Add a variant (SKU) to a product
+      operationId: adminCreateVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VariantCreateRequest' }
+            example: { sku: AUR-HP-WHT, variant_name: White, attributes: { color: White }, price: 4999, stock: 8 }
+      responses:
+        '201':
+          description: Variant created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [variant]
+                properties:
+                  variant: { $ref: '#/components/schemas/Variant' }
+        '400':
+          description: Missing SKU/price, or the SKU is already taken.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                missing: { value: { error: SKU and price are required. } }
+                duplicate: { value: { error: That SKU already exists. } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/products/variants/{variantId}:
+    parameters:
+      - $ref: '#/components/parameters/VariantId'
+    put:
+      tags: [Variants]
+      summary: Update a variant's name, price or active flag
+      description: Every field is optional — omitted fields keep their current value.
+      operationId: adminUpdateVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                variant_name: { type: [string, 'null'], example: Midnight Black }
+                price: { type: [number, 'null'], minimum: 0, example: 5299 }
+                is_active: { type: [boolean, 'null'], example: true }
+            example: { price: 5299, is_active: true }
+      responses:
+        '200':
+          description: Variant updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [variant]
+                properties:
+                  variant: { $ref: '#/components/schemas/Variant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Variant not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Variant not found. }
+
+  /api/products/variants/{variantId}/stock:
+    parameters:
+      - $ref: '#/components/parameters/VariantId'
+    patch:
+      tags: [Variants]
+      summary: Set or adjust a variant's stock level
+      description: |
+        Provide **either** `stock` (absolute value) **or** `delta` (relative
+        adjustment). `delta` takes precedence if both are sent. Stock is
+        floored at 0 — it can never go negative.
+      operationId: adminAdjustStock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Send `stock` or `delta` (at least one is required).
+              properties:
+                stock: { type: integer, minimum: 0, description: 'Absolute new stock level.', example: 40 }
+                delta: { type: integer, description: 'Relative change; may be negative.', example: -3 }
+              anyOf:
+                - required: [stock]
+                - required: [delta]
+            examples:
+              absolute: { summary: Set to an exact level, value: { stock: 40 } }
+              relative: { summary: Decrement by 3, value: { delta: -3 } }
+      responses:
+        '200':
+          description: Stock updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [variant]
+                properties:
+                  variant: { $ref: '#/components/schemas/Variant' }
+        '400':
+          description: Neither `stock` nor `delta` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Provide a new stock value or a delta. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Variant not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────────────  ORDERS  ───────────────────────────────
+  /api/orders:
+    get:
+      tags: [Orders]
+      summary: List all orders (across every customer)
+      operationId: adminListOrders
+      parameters:
+        - name: status
+          in: query
+          description: Filter by exact order status.
+          schema: { $ref: '#/components/schemas/OrderStatus' }
+        - name: q
+          in: query
+          description: Case-insensitive match on order number, customer name or customer email.
+          schema: { type: string }
+          example: SK-2026
+      responses:
+        '200':
+          description: Matching orders, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminOrderListItem' }
+              example:
+                orders:
+                  - id: 1001
+                    order_number: SK-2026-001001
+                    status: paid
+                    payment_status: paid
+                    total: '9718.06'
+                    placed_at: '2026-07-24T10:35:00Z'
+                    tracking_carrier: null
+                    tracking_number: null
+                    customer_id: 42
+                    customer_name: Aarav Sharma
+                    customer_email: aarav@example.com
+                    item_count: 2
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      summary: Get one order with its line items and customer
+      operationId: adminGetOrder
+      responses:
+        '200':
+          description: Full order detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/AdminOrderDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/orders/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    patch:
+      tags: [Orders]
+      summary: Advance an order through the fulfilment workflow
+      description: |
+        Applies an allowed transition and stamps the matching timestamp column
+        (`packed_at`, `shipped_at`, `delivered_at`, `cancelled_at`).
+
+        - `paid` → `packed` | `cancelled`
+        - `packed` → `shipped` | `cancelled`
+        - `shipped` → `delivered`
+
+        Moving to `shipped` requires a tracking number (supplied here or
+        already stored). Cancelling **restocks every line item**.
+      operationId: adminUpdateOrderStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum: [packed, shipped, delivered, cancelled]
+                  description: The target status; must be legal from the current one.
+                tracking_carrier: { type: [string, 'null'], example: BlueDart }
+                tracking_number: { type: [string, 'null'], example: BD123456789IN }
+            examples:
+              pack: { summary: Mark as packed, value: { status: packed } }
+              ship: { summary: Ship with tracking, value: { status: shipped, tracking_carrier: BlueDart, tracking_number: BD123456789IN } }
+              cancel: { summary: Cancel and restock, value: { status: cancelled } }
+      responses:
+        '200':
+          description: Status updated; returns the full order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: '#/components/schemas/AdminOrderDetail' }
+        '400':
+          description: Missing target status, or shipping without a tracking number.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                missing: { value: { error: A target status is required. } }
+                tracking: { value: { error: Add a tracking number before marking as shipped. } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The requested transition is not legal from the current status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'Cannot move an order from "delivered" to "packed".' }
+
+  # ───────────────────────────────  TRACEABILITY  ─────────────────────────
+  /api/trace/customers:
+    get:
+      tags: [Traceability]
+      summary: Search customers
+      description: |
+        Matches on name, email or phone; if `q` is all digits it also matches
+        the customer id exactly. Returns at most 25 rows. An empty `q` returns
+        an empty list rather than every customer.
+      operationId: traceSearchCustomers
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Search term (name, email, phone, or numeric id).
+          schema: { type: string }
+          example: aarav
+      responses:
+        '200':
+          description: Matching customers with their order counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [customers]
+                properties:
+                  customers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, example: 42 }
+                        name: { type: string, example: Aarav Sharma }
+                        email: { type: string, format: email }
+                        phone: { type: [string, 'null'] }
+                        created_at: { type: string, format: date-time }
+                        order_count: { type: integer, example: 3 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/trace/customers/{id}/purchases:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Customer (user) identifier.
+        schema: { type: integer, minimum: 1 }
+        example: 42
+    get:
+      tags: [Traceability]
+      summary: Every product a customer has ever bought
+      description: Resolved through the customer's orders — never a direct user↔product link.
+      operationId: traceCustomerPurchases
+      responses:
+        '200':
+          description: The customer and their full purchase history.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [customer, purchases]
+                properties:
+                  customer:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      name: { type: string }
+                      email: { type: string, format: email }
+                      phone: { type: [string, 'null'] }
+                  purchases:
+                    type: array
+                    items: { $ref: '#/components/schemas/PurchaseRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Customer not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Customer not found. }
+
+  /api/trace/products:
+    get:
+      tags: [Traceability]
+      summary: Search products
+      description: Matches on product name or variant SKU; numeric `q` also matches the product id. Max 25 rows.
+      operationId: traceSearchProducts
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Search term (product name, SKU, or numeric id).
+          schema: { type: string }
+          example: AUR-HP
+      responses:
+        '200':
+          description: Matching products.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [products]
+                properties:
+                  products:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, example: 3 }
+                        name: { type: string, example: Wireless Headphones }
+                        category: { type: string, example: Electronics }
+                        brand: { type: [string, 'null'], example: SonicWave }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/trace/products/{id}/buyers:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [Traceability]
+      summary: Every customer who has bought a product
+      description: The reverse trace — also resolved through orders and order items.
+      operationId: traceProductBuyers
+      responses:
+        '200':
+          description: The product and everyone who purchased it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product, buyers]
+                properties:
+                  product:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      name: { type: string }
+                      category: { type: string }
+                      brand: { type: [string, 'null'] }
+                  buyers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        customer_id: { type: integer, example: 42 }
+                        customer_name: { type: string, example: Aarav Sharma }
+                        customer_email: { type: string, format: email }
+                        customer_phone: { type: [string, 'null'] }
+                        sku: { type: string, example: AUR-HP-BLK }
+                        variant_name: { type: string, example: Black }
+                        unit_price: { $ref: '#/components/schemas/DecimalString' }
+                        quantity: { type: integer, example: 2 }
+                        line_total: { $ref: '#/components/schemas/DecimalString' }
+                        order_id: { type: integer, example: 1001 }
+                        order_number: { type: string, example: SK-2026-001001 }
+                        order_status: { $ref: '#/components/schemas/OrderStatus' }
+                        placed_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Product not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: Product not found. }
+
+  /api/trace/records:
+    get:
+      tags: [Traceability]
+      summary: Search the flat purchase-record view (JSON or CSV export)
+      description: |
+        One row per `order_item`, joined to its order and customer. All filters
+        combine with AND. Capped at **2000** rows.
+
+        Set `format=csv` to download the result as a CSV file instead of JSON
+        (`Content-Disposition: attachment; filename="purchase-records.csv"`).
+      operationId: traceSearchRecords
+      parameters:
+        - name: customer
+          in: query
+          description: Partial match on customer name, email or phone.
+          schema: { type: string }
+          example: aarav
+        - name: product
+          in: query
+          description: Partial match on the snapshotted product name.
+          schema: { type: string }
+          example: headphones
+        - name: sku
+          in: query
+          description: Partial match on the snapshotted SKU.
+          schema: { type: string }
+          example: AUR-HP
+        - name: status
+          in: query
+          description: Exact order status.
+          schema: { $ref: '#/components/schemas/OrderStatus' }
+        - name: from
+          in: query
+          description: Only orders placed on or after this timestamp.
+          schema: { type: string, format: date-time }
+          example: '2026-07-01T00:00:00Z'
+        - name: to
+          in: query
+          description: Only orders placed on or before this timestamp.
+          schema: { type: string, format: date-time }
+          example: '2026-07-31T23:59:59Z'
+        - name: format
+          in: query
+          description: Set to `csv` to download a CSV file instead of JSON.
+          schema: { type: string, enum: [csv] }
+      responses:
+        '200':
+          description: |
+            Matching purchase records — JSON by default, or a CSV file when
+            `format=csv`.
+          headers:
+            Content-Disposition:
+              description: Present only for CSV responses.
+              schema: { type: string, example: 'attachment; filename="purchase-records.csv"' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records, count]
+                properties:
+                  records:
+                    type: array
+                    items: { $ref: '#/components/schemas/PurchaseRecord' }
+                  count: { type: integer, description: Number of rows returned (max 2000)., example: 128 }
+            text/csv:
+              schema: { type: string, format: binary }
+              example: |
+                Order Number,Order Status,Purchase Date,Customer ID,Customer,Email,Phone,Product,Variant,SKU,Price Paid,Qty,Line Total
+                SK-2026-001001,paid,2026-07-24T10:35:00.000Z,42,Aarav Sharma,aarav@example.com,+919812345678,Wireless Headphones,Black,AUR-HP-BLK,4499.00,2,8998.00
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ───────────────────────────────  REPORTS  ──────────────────────────────
+  /api/reports/summary:
+    get:
+      tags: [Reports]
+      summary: Headline totals, top products, revenue per day and repeat-customer rate
+      description: |
+        Revenue counts **paid, non-cancelled** orders only. Top products rank by
+        units sold across all non-cancelled orders (top 10). Revenue-by-day
+        returns up to the last 30 active days in chronological order, ready for
+        charting.
+      operationId: adminReportSummary
+      responses:
+        '200':
+          description: Aggregated business report.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportSummary' }
+              example:
+                totals:
+                  total_revenue: '184320.50'
+                  total_orders: 42
+                  total_customers: 18
+                  active_products: 8
+                top_products:
+                  - { product_id: 3, product_name: Wireless Headphones, units_sold: 37, revenue: '166463.00' }
+                revenue_by_day:
+                  - { day: '2026-07-23', revenue: '18420.00', orders: 4 }
+                  - { day: '2026-07-24', revenue: '9718.06', orders: 1 }
+                repeat_customers:
+                  customers_with_orders: 18
+                  repeat_customers: 7
+                  repeat_rate_pct: 38.9
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+# ============================================================================
+#  COMPONENTS
+# ============================================================================
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Admin JWT from `POST /api/auth/login`, sent as
+        `Authorization: Bearer <token>`. The token payload must have
+        `role: "admin"` — customer tokens are rejected with `403`.
+
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      description: Product identifier.
+      schema: { type: integer, minimum: 1 }
+      example: 3
+    VariantId:
+      name: variantId
+      in: path
+      required: true
+      description: Product variant (SKU) identifier.
+      schema: { type: integer, minimum: 1 }
+      example: 108
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: Order identifier.
+      schema: { type: integer, minimum: 1 }
+      example: 1001
+
+  responses:
+    BadRequest:
+      description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Email and password are required. }
+    Unauthorized:
+      description: Missing, invalid or expired token.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            missing: { value: { error: Please log in to continue. } }
+            expired: { value: { error: Your session has expired. Please log in again. } }
+    Forbidden:
+      description: Authenticated, but the token does not belong to an administrator.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: This dashboard is for admins only. }
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: Not found. }
+
+  schemas:
+    Error:
+      type: object
+      description: Standard error body returned by every failing endpoint.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error: { type: string, example: Please log in to continue. }
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, const: true }
+
+    DecimalString:
+      type: string
+      description: |
+        Fixed-precision decimal serialised as a string (PostgreSQL NUMERIC).
+        Parse before doing arithmetic.
+      pattern: '^-?\d+(\.\d+)?$'
+      example: '4499.00'
+
+    AdminUser:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: Store Admin }
+        email: { type: string, format: email, example: admin@shopkart.local }
+        role: { type: string, const: admin }
+
+    OrderStatus:
+      type: string
+      enum: [placed, paid, packed, shipped, delivered, cancelled]
+      example: paid
+
+    PaymentStatus:
+      type: string
+      enum: [unpaid, paid]
+      example: paid
+
+    AdminProductListItem:
+      type: object
+      required: [id, name, category, base_price, is_archived, variant_count, total_stock]
+      properties:
+        id: { type: integer, example: 3 }
+        name: { type: string, example: Wireless Headphones }
+        category: { type: string, example: Electronics }
+        brand: { type: [string, 'null'], example: SonicWave }
+        base_price: { $ref: '#/components/schemas/DecimalString' }
+        is_archived: { type: boolean, example: false }
+        created_at: { type: string, format: date-time }
+        variant_count: { type: integer, description: 'Number of variants (all, including inactive).', example: 2 }
+        total_stock: { type: integer, description: Sum of stock across all variants., example: 35 }
+
+    AdminProduct:
+      type: object
+      description: A full row from the products table.
+      required: [id, name, category, base_price, is_archived]
+      properties:
+        id: { type: integer, example: 3 }
+        name: { type: string, example: Wireless Headphones }
+        slug: { type: [string, 'null'], example: wireless-headphones-48213 }
+        description: { type: [string, 'null'] }
+        category: { type: string, example: Electronics }
+        brand: { type: [string, 'null'], example: SonicWave }
+        base_price: { $ref: '#/components/schemas/DecimalString' }
+        is_archived: { type: boolean, example: false }
+        created_at: { type: string, format: date-time }
+
+    AdminProductDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminProduct'
+        - type: object
+          required: [variants, images]
+          properties:
+            variants:
+              type: array
+              items: { $ref: '#/components/schemas/Variant' }
+            images:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: integer, example: 501 }
+                  product_id: { type: integer, example: 3 }
+                  url: { type: string, format: uri }
+                  position: { type: integer, example: 0 }
+
+    Variant:
+      type: object
+      required: [id, product_id, sku, variant_name, price, stock, is_active]
+      properties:
+        id: { type: integer, example: 108 }
+        product_id: { type: integer, example: 3 }
+        sku: { type: string, example: AUR-HP-BLK }
+        variant_name: { type: string, default: Default, example: Black }
+        attributes:
+          type: object
+          description: Free-form key/value attributes (JSONB).
+          additionalProperties: true
+          example: { color: Black }
+        price: { $ref: '#/components/schemas/DecimalString' }
+        stock: { type: integer, minimum: 0, example: 12 }
+        is_active: { type: boolean, example: true }
+
+    VariantCreateRequest:
+      type: object
+      required: [sku, price]
+      additionalProperties: false
+      properties:
+        sku: { type: string, description: Must be globally unique., example: AUR-HP-WHT }
+        variant_name: { type: string, default: Default, example: White }
+        attributes: { type: object, additionalProperties: true, example: { color: White } }
+        price: { type: number, minimum: 0, example: 4999 }
+        stock: { type: integer, minimum: 0, default: 0, example: 8 }
+
+    ProductCreateRequest:
+      type: object
+      required: [name, category]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, example: Aurora Wireless Headphones }
+        description: { type: [string, 'null'] }
+        category: { type: string, minLength: 1, example: Electronics }
+        brand: { type: [string, 'null'], example: Aurora }
+        base_price: { type: number, minimum: 0, default: 0, example: 4999 }
+        image_url:
+          type: [string, 'null']
+          format: uri
+          description: Optional primary image, stored at position 0.
+        variants:
+          type: array
+          description: Optional variants created alongside the product. Entries without `sku` or `price` are skipped.
+          items: { $ref: '#/components/schemas/VariantCreateRequest' }
+
+    ProductUpdateRequest:
+      type: object
+      required: [name, category]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1 }
+        description: { type: [string, 'null'] }
+        category: { type: string, minLength: 1 }
+        brand: { type: [string, 'null'] }
+        base_price: { type: number, minimum: 0, default: 0 }
+
+    AdminOrderListItem:
+      type: object
+      required: [id, order_number, status, payment_status, total, placed_at, customer_id, item_count]
+      properties:
+        id: { type: integer, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        total: { $ref: '#/components/schemas/DecimalString' }
+        placed_at: { type: string, format: date-time }
+        tracking_carrier: { type: [string, 'null'], example: BlueDart }
+        tracking_number: { type: [string, 'null'], example: BD123456789IN }
+        customer_id: { type: integer, example: 42 }
+        customer_name: { type: string, example: Aarav Sharma }
+        customer_email: { type: string, format: email }
+        item_count: { type: integer, description: Total quantity across line items., example: 2 }
+
+    OrderItem:
+      type: object
+      description: Immutable snapshot of a purchased line item.
+      required: [id, order_id, product_name, variant_name, sku, unit_price, quantity, line_total]
+      properties:
+        id: { type: integer, example: 900 }
+        order_id: { type: integer, example: 1001 }
+        product_id: { type: [integer, 'null'], example: 3 }
+        variant_id: { type: [integer, 'null'], example: 108 }
+        product_name: { type: string, example: Wireless Headphones }
+        variant_name: { type: string, example: Black }
+        sku: { type: string, example: AUR-HP-BLK }
+        unit_price: { $ref: '#/components/schemas/DecimalString' }
+        quantity: { type: integer, minimum: 1, example: 2 }
+        line_total: { $ref: '#/components/schemas/DecimalString' }
+
+    AdminOrderDetail:
+      type: object
+      description: Full order row plus the customer and its line items.
+      required: [id, order_number, status, payment_status, total, placed_at, items]
+      properties:
+        id: { type: integer, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+        user_id: { type: integer, example: 42 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        subtotal: { $ref: '#/components/schemas/DecimalString' }
+        discount: { $ref: '#/components/schemas/DecimalString' }
+        tax: { $ref: '#/components/schemas/DecimalString' }
+        shipping_fee: { $ref: '#/components/schemas/DecimalString' }
+        total: { $ref: '#/components/schemas/DecimalString' }
+        coupon_code: { type: [string, 'null'], example: WELCOME10 }
+        ship_recipient: { type: [string, 'null'] }
+        ship_phone: { type: [string, 'null'] }
+        ship_line1: { type: [string, 'null'] }
+        ship_line2: { type: [string, 'null'] }
+        ship_city: { type: [string, 'null'] }
+        ship_state: { type: [string, 'null'] }
+        ship_postal: { type: [string, 'null'] }
+        ship_country: { type: [string, 'null'] }
+        tracking_carrier: { type: [string, 'null'] }
+        tracking_number: { type: [string, 'null'] }
+        placed_at: { type: string, format: date-time }
+        paid_at: { type: [string, 'null'], format: date-time }
+        packed_at: { type: [string, 'null'], format: date-time }
+        shipped_at: { type: [string, 'null'], format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
+        cancelled_at: { type: [string, 'null'], format: date-time }
+        customer_name: { type: string, example: Aarav Sharma }
+        customer_email: { type: string, format: email }
+        customer_phone: { type: [string, 'null'] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+
+    PurchaseRecord:
+      type: object
+      description: One flattened purchase row — an order item joined to its order (and customer, where applicable).
+      properties:
+        order_item_id: { type: integer, description: Present on the customer-purchases endpoint., example: 900 }
+        order_id: { type: integer, example: 1001 }
+        order_number: { type: string, example: SK-2026-001001 }
+        order_status: { $ref: '#/components/schemas/OrderStatus' }
+        placed_at: { type: string, format: date-time }
+        customer_id: { type: integer, description: Present on the records endpoint., example: 42 }
+        customer_name: { type: string, example: Aarav Sharma }
+        customer_email: { type: string, format: email }
+        customer_phone: { type: [string, 'null'] }
+        product_id: { type: [integer, 'null'], example: 3 }
+        product_name: { type: string, example: Wireless Headphones }
+        variant_name: { type: string, example: Black }
+        sku: { type: string, example: AUR-HP-BLK }
+        unit_price: { $ref: '#/components/schemas/DecimalString' }
+        quantity: { type: integer, example: 2 }
+        line_total: { $ref: '#/components/schemas/DecimalString' }
+
+    ReportSummary:
+      type: object
+      required: [totals, top_products, revenue_by_day, repeat_customers]
+      properties:
+        totals:
+          type: object
+          description: Headline figures. Revenue counts paid, non-cancelled orders.
+          properties:
+            total_revenue: { $ref: '#/components/schemas/DecimalString' }
+            total_orders: { type: integer, example: 42 }
+            total_customers: { type: integer, description: Users with role=customer., example: 18 }
+            active_products: { type: integer, description: Non-archived products., example: 8 }
+        top_products:
+          type: array
+          description: Top 10 products by units sold across non-cancelled orders.
+          items:
+            type: object
+            properties:
+              product_id: { type: [integer, 'null'], example: 3 }
+              product_name: { type: string, example: Wireless Headphones }
+              units_sold: { type: integer, example: 37 }
+              revenue: { $ref: '#/components/schemas/DecimalString' }
+        revenue_by_day:
+          type: array
+          description: Up to the last 30 active days, chronological (oldest first).
+          items:
+            type: object
+            properties:
+              day: { type: string, format: date, example: '2026-07-24' }
+              revenue: { $ref: '#/components/schemas/DecimalString' }
+              orders: { type: integer, example: 4 }
+        repeat_customers:
+          type: object
+          properties:
+            customers_with_orders: { type: integer, example: 18 }
+            repeat_customers: { type: integer, description: Customers with 2+ non-cancelled orders., example: 7 }
+            repeat_rate_pct: { type: number, description: 'Percentage, one decimal place.', example: 38.9 }
