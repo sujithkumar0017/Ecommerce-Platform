@@ -52,12 +52,10 @@ info:
     identifier: MIT
 
 servers:
+  - url: https://shopkart-ecommerce-api.onrender.com
+    description: Deployed e-commerce API (Render)
   - url: http://localhost:3000
     description: Local development server (default PORT=3000)
-  # Only the development server is defined because staging/production URLs are
-  # not part of the current project configuration. Add them here when available:
-  #   - url: https://staging.your-domain.tld
-  #   - url: https://api.your-domain.tld
 
 tags:
   - name: System
